@@ -1,0 +1,23 @@
+[package]
+name = "worktree-cleaner"
+version = "0.1.0"
+edition = "2024"
+description = "Traverse a directory tree, find git worktrees, rank them by relevance, and interactively delete orphaned or stale ones."
+license = "MIT"
+repository = "https://github.com/DecampsRenan/worktree-cleaner"
+readme = "README.md"
+keywords = ["git", "worktree", "tui", "cli", "cleanup"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "wtc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+chrono = "0.4.45"
+clap = { version = "4.6.1", features = ["derive"] }
+crossterm = "0.29.0"
+git2 = "0.21.0"
+ignore = "0.4.26"
+ratatui = "0.30.2"
