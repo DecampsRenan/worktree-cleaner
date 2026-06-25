@@ -33,3 +33,15 @@ pub enum WorktreeStatus {
     /// The primary working tree of a repository (never auto-deleted).
     MainRepo,
 }
+
+impl WorktreeStatus {
+    /// Short lowercase label for display.
+    pub fn label(self) -> &'static str {
+        match self {
+            WorktreeStatus::Orphaned => "orphaned",
+            WorktreeStatus::Stale => "stale",
+            WorktreeStatus::Active => "active",
+            WorktreeStatus::MainRepo => "main",
+        }
+    }
+}
