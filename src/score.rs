@@ -3,7 +3,7 @@ use crate::worktree::Worktree;
 /// Relevance score for deletion: a higher score means a stronger deletion
 /// candidate.
 ///
-/// TODO(#4): weight by status (orphaned > stale > active, main repo excluded),
+/// TODO(#3): weight by status (orphaned > stale > active, main repo excluded),
 /// age of the last commit, filesystem mtime, and whether the branch is merged.
 pub fn relevance(_wt: &Worktree) -> f64 {
     0.0
