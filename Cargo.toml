@@ -21,3 +21,6 @@ crossterm = "0.29.0"
 git2 = "0.21.0"
 ignore = "0.4.26"
 ratatui = "0.30.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
