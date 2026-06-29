@@ -19,6 +19,9 @@ pub struct Worktree {
     pub last_modified: Option<DateTime<Utc>>,
     /// Health / deletion-eligibility of the worktree.
     pub status: WorktreeStatus,
+    /// Whether this worktree's HEAD is already merged into the owning repo's
+    /// default branch (a strong hint it's safe to delete). `false` when unknown.
+    pub merged: bool,
 }
 
 /// Why a worktree might (or might not) be a deletion candidate.

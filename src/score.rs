@@ -6,11 +6,9 @@ use crate::worktree::{Worktree, WorktreeStatus};
 /// candidate. The main working tree is never a candidate.
 ///
 /// The integer part is the status tier (orphaned > stale > active); the
-/// fractional part in `[0, 1)` grows with age, so older worktrees sort first
-/// within a tier without ever crossing into another tier.
-///
-/// TODO(#3): factor in whether the branch is already merged (needs a `merged`
-/// signal recorded during the scan).
+/// fractional part in `[0, 1)` ranks within a tier — half weight to whether the
+/// branch is already merged, half to age — so a merged worktree outranks an
+/// unmerged peer of the same age, and neither ever crosses into another tier.
 pub fn relevance(wt: &Worktree) -> f64 {
     let tier = match wt.status {
         WorktreeStatus::MainRepo => return f64::NEG_INFINITY,
@@ -18,7 +16,8 @@ pub fn relevance(wt: &Worktree) -> f64 {
         WorktreeStatus::Stale => 2.0,
         WorktreeStatus::Active => 1.0,
     };
-    tier + age_factor(wt)
+    let merged_factor = if wt.merged { 1.0 } else { 0.0 };
+    tier + 0.5 * merged_factor + 0.5 * age_factor(wt)
 }
 
 /// Age contribution in `[0, 1)`: 0 for just-touched, approaching 1 as the
@@ -65,6 +64,14 @@ mod tests {
             last_commit: Some(when),
             last_modified: Some(when),
             status,
+            merged: false,
+        }
+    }
+
+    fn merged_wt(status: WorktreeStatus, days_old: i64) -> Worktree {
+        Worktree {
+            merged: true,
+            ..wt(status, days_old)
         }
     }
 
@@ -123,5 +130,18 @@ mod tests {
 
         assert_eq!(v[0].status, WorktreeStatus::Active);
         assert_eq!(v[1].status, WorktreeStatus::MainRepo);
+    }
+
+    #[test]
+    fn merged_worktrees_rank_above_unmerged_peers() {
+        let mut v = vec![
+            wt(WorktreeStatus::Stale, 30),        // unmerged
+            merged_wt(WorktreeStatus::Stale, 30), // merged, same status and age
+        ];
+
+        rank(&mut v);
+
+        assert!(v[0].merged, "the merged worktree should rank first");
+        assert!(!v[1].merged);
     }
 }
