@@ -11,7 +11,10 @@ mod worktree;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use clap::Parser;
+
+use crate::worktree::Worktree;
 
 /// Traverse a directory tree, find git worktrees, rank them by relevance, and
 /// interactively delete orphaned or stale ones.
@@ -38,8 +41,45 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Interim non-interactive listing. The interactive multi-select TUI (#4)
+    // and deletion (#5) replace this flow once implemented.
+    print_listing(&worktrees);
+
     let selected = tui::select_for_deletion(worktrees)?;
     delete::delete(&selected, args.dry_run)?;
 
     Ok(())
+}
+
+/// Print discovered worktrees, best deletion candidate first.
+fn print_listing(worktrees: &[Worktree]) {
+    println!(
+        "Found {} worktree(s), most worth deleting first:\n",
+        worktrees.len()
+    );
+    for w in worktrees {
+        println!(
+            "  {:<8}  {:>12}  {:<20}  {}",
+            w.status.label(),
+            humanize_age(w.last_commit.or(w.last_modified)),
+            w.branch.as_deref().unwrap_or("-"),
+            w.path.display(),
+        );
+    }
+    println!("\nInteractive selection and deletion are coming in #4 and #5.");
+}
+
+/// Render a timestamp as a coarse "Nd/Nmo/Ny ago" age, or "unknown".
+fn humanize_age(when: Option<DateTime<Utc>>) -> String {
+    let Some(when) = when else {
+        return "unknown".to_string();
+    };
+    let days = Utc::now().signed_duration_since(when).num_days().max(0);
+    match days {
+        0 => "today".to_string(),
+        1 => "1 day ago".to_string(),
+        2..=30 => format!("{days} days ago"),
+        31..=364 => format!("{} mo ago", days / 30),
+        _ => format!("{} yr ago", days / 365),
+    }
 }
