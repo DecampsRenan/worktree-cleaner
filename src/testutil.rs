@@ -3,6 +3,22 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
+use crate::worktree::{Worktree, WorktreeStatus};
+
+/// Build a bare [`Worktree`] with the given path and status (no git metadata),
+/// for testing pure logic that only depends on those fields.
+pub fn fake_worktree(path: &str, status: WorktreeStatus) -> Worktree {
+    Worktree {
+        path: path.into(),
+        repo_path: None,
+        branch: None,
+        head: None,
+        last_commit: None,
+        last_modified: None,
+        status,
+    }
+}
+
 /// Run a git command in `cwd`, isolated from the user's global/system config,
 /// asserting success and returning its captured output.
 pub fn git(cwd: &Path, args: &[&str]) -> Output {

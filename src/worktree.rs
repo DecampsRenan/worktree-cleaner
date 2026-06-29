@@ -45,3 +45,20 @@ impl WorktreeStatus {
         }
     }
 }
+
+impl Worktree {
+    /// A coarse "Nd/Nmo/Ny ago" label for the worktree's last activity.
+    pub fn age_label(&self) -> String {
+        let Some(when) = self.last_commit.or(self.last_modified) else {
+            return "unknown".to_string();
+        };
+        let days = Utc::now().signed_duration_since(when).num_days().max(0);
+        match days {
+            0 => "today".to_string(),
+            1 => "1 day ago".to_string(),
+            2..=30 => format!("{days} days ago"),
+            31..=364 => format!("{} mo ago", days / 30),
+            _ => format!("{} yr ago", days / 365),
+        }
+    }
+}
