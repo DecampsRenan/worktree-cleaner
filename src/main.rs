@@ -5,6 +5,8 @@
 mod delete;
 mod scan;
 mod score;
+#[cfg(test)]
+mod testutil;
 mod tui;
 mod worktree;
 
@@ -46,7 +48,14 @@ fn main() -> Result<()> {
     print_listing(&worktrees);
 
     let selected = tui::select_for_deletion(worktrees)?;
-    delete::delete(&selected, args.dry_run)?;
+    for outcome in delete::delete(&selected, args.dry_run) {
+        println!(
+            "  {:?}  {}  {}",
+            outcome.action,
+            outcome.path.display(),
+            outcome.detail
+        );
+    }
 
     Ok(())
 }

@@ -134,56 +134,10 @@ fn linked_repo_path(git_file: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{add_worktree, commit, commit_at, init_repo};
     use crate::worktree::WorktreeStatus;
     use std::path::PathBuf;
-    use std::process::Command;
     use tempfile::tempdir;
-
-    /// Run a git command in `cwd`, isolated from the user's global/system config.
-    fn git(cwd: &Path, args: &[&str]) {
-        let ok = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .status()
-            .expect("git should be runnable");
-        assert!(ok.success(), "git {args:?} failed");
-    }
-
-    /// `git init` a repo at `path` (creating parent dirs).
-    fn init_repo(path: &Path) {
-        std::fs::create_dir_all(path).unwrap();
-        git(path, &["init", "-q", "-b", "main"]);
-    }
-
-    /// Create an empty commit so `HEAD` exists (needed for `worktree add`).
-    fn commit(repo: &Path) {
-        git(repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
-    }
-
-    /// Create an empty commit dated `date` (e.g. "2020-01-01T00:00:00") so the
-    /// worktree's last activity can be controlled.
-    fn commit_at(repo: &Path, date: &str) {
-        let ok = Command::new("git")
-            .args(["commit", "-q", "--allow-empty", "-m", "old"])
-            .current_dir(repo)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .env("GIT_AUTHOR_DATE", date)
-            .env("GIT_COMMITTER_DATE", date)
-            .status()
-            .expect("git should be runnable");
-        assert!(ok.success(), "git commit_at failed");
-    }
 
     fn paths(found: &[Worktree]) -> Vec<PathBuf> {
         let mut p: Vec<PathBuf> = found.iter().map(|w| w.path.clone()).collect();
@@ -211,7 +165,7 @@ mod tests {
         commit(&repo);
 
         let wt = tmp.path().join("wt");
-        git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        add_worktree(&repo, &wt);
 
         let found = scan(tmp.path()).unwrap();
 
@@ -265,7 +219,7 @@ mod tests {
         init_repo(&repo);
         commit(&repo);
         let wt = tmp.path().join("wt");
-        git(&repo, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+        add_worktree(&repo, &wt);
 
         // The owning repository disappears, leaving the worktree dangling.
         std::fs::remove_dir_all(&repo).unwrap();
@@ -285,20 +239,14 @@ mod tests {
         init_repo(&stale_repo);
         commit_at(&stale_repo, "2020-01-01T00:00:00");
         let stale_wt = tmp.path().join("stale-wt");
-        git(
-            &stale_repo,
-            &["worktree", "add", "-q", stale_wt.to_str().unwrap()],
-        );
+        add_worktree(&stale_repo, &stale_wt);
 
         // Active: a recent commit.
         let active_repo = tmp.path().join("active");
         init_repo(&active_repo);
         commit(&active_repo);
         let active_wt = tmp.path().join("active-wt");
-        git(
-            &active_repo,
-            &["worktree", "add", "-q", active_wt.to_str().unwrap()],
-        );
+        add_worktree(&active_repo, &active_wt);
 
         let found = scan(tmp.path()).unwrap();
         let by_path = |p: &Path| found.iter().find(|w| w.path == p).unwrap();
