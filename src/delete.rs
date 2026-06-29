@@ -199,6 +199,7 @@ mod tests {
             last_modified: None,
             status: WorktreeStatus::Stale,
             merged: false,
+            size_bytes: 0,
         };
 
         let outcomes = delete(&[bogus, healthy], false);

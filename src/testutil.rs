@@ -17,6 +17,7 @@ pub fn fake_worktree(path: &str, status: WorktreeStatus) -> Worktree {
         last_modified: None,
         status,
         merged: false,
+        size_bytes: 0,
     }
 }
 

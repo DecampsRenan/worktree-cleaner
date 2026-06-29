@@ -6,6 +6,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::size::format_size;
 use crate::worktree::{Worktree, WorktreeStatus};
 
 /// Interactive selection state over a ranked list of worktrees. Pure logic,
@@ -70,6 +71,16 @@ impl Selector {
         for i in 0..self.items.len() {
             self.selected[i] = self.selectable(i) && !all_selected;
         }
+    }
+
+    /// Total on-disk size of the currently-selected worktrees, in bytes.
+    pub fn selected_size(&self) -> u64 {
+        self.items
+            .iter()
+            .zip(&self.selected)
+            .filter(|&(_, &sel)| sel)
+            .map(|(w, _)| w.size_bytes)
+            .sum()
     }
 
     /// Consume the selector, returning the worktrees the user chose.
@@ -151,9 +162,10 @@ fn render(frame: &mut Frame, selector: &Selector) {
                 (None, false) => "-".to_string(),
             };
             let text = format!(
-                "{mark} {:<8} {:>12}  {:<22} {:<8} {}",
+                "{mark} {:<8} {:>12} {:>9}  {:<22} {:<8} {}",
                 w.status.label(),
                 w.age_label(),
+                format_size(w.size_bytes),
                 branch,
                 w.head.as_deref().unwrap_or("-"),
                 w.path.display(),
@@ -180,7 +192,8 @@ fn render(frame: &mut Frame, selector: &Selector) {
     frame.render_stateful_widget(list, list_area, &mut state);
 
     let footer = Line::from(format!(
-        " {selected} selected · space/x toggle · a all · ↑/↓ move · enter delete · q cancel"
+        " {selected} selected ({}) · space/x toggle · a all · ↑/↓ move · enter delete · q cancel",
+        format_size(selector.selected_size()),
     ))
     .style(Style::default().add_modifier(Modifier::DIM));
     frame.render_widget(footer, footer_area);
@@ -282,5 +295,29 @@ mod tests {
         let chosen = s.selected_worktrees();
         let paths: Vec<_> = chosen.iter().map(|w| w.path.to_str().unwrap()).collect();
         assert_eq!(paths, vec!["/a", "/c"]);
+    }
+
+    #[test]
+    fn selected_size_totals_only_selected_rows() {
+        let mut s = Selector::new(vec![
+            Worktree {
+                size_bytes: 100,
+                ..fake_worktree("/a", Orphaned)
+            },
+            Worktree {
+                size_bytes: 200,
+                ..fake_worktree("/b", Stale)
+            },
+            Worktree {
+                size_bytes: 400,
+                ..fake_worktree("/c", Active)
+            },
+        ]);
+        s.toggle(); // /a (100)
+        s.move_down();
+        s.move_down();
+        s.toggle(); // /c (400)
+
+        assert_eq!(s.selected_size(), 500);
     }
 }
