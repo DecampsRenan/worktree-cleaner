@@ -144,11 +144,17 @@ fn render(frame: &mut Frame, selector: &Selector) {
             } else {
                 "[ ]"
             };
+            let branch = match (w.branch.as_deref(), w.merged) {
+                (Some(b), true) => format!("{b} (merged)"),
+                (Some(b), false) => b.to_string(),
+                (None, true) => "(merged)".to_string(),
+                (None, false) => "-".to_string(),
+            };
             let text = format!(
-                "{mark} {:<8} {:>12}  {:<18} {:<8} {}",
+                "{mark} {:<8} {:>12}  {:<22} {:<8} {}",
                 w.status.label(),
                 w.age_label(),
-                w.branch.as_deref().unwrap_or("-"),
+                branch,
                 w.head.as_deref().unwrap_or("-"),
                 w.path.display(),
             );

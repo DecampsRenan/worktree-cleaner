@@ -16,6 +16,7 @@ pub fn fake_worktree(path: &str, status: WorktreeStatus) -> Worktree {
         last_commit: None,
         last_modified: None,
         status,
+        merged: false,
     }
 }
 

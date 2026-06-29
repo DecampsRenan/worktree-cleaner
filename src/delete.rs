@@ -198,6 +198,7 @@ mod tests {
             last_commit: None,
             last_modified: None,
             status: WorktreeStatus::Stale,
+            merged: false,
         };
 
         let outcomes = delete(&[bogus, healthy], false);

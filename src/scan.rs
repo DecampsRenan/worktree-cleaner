@@ -75,6 +75,12 @@ fn classify(path: PathBuf, repo_path: Option<PathBuf>, is_main: bool) -> Worktre
         WorktreeStatus::Active
     };
 
+    // Only meaningful for linked worktrees we can open; unknown ⇒ false.
+    let merged = match (&opened, is_main) {
+        (Some(repo), false) => is_merged(repo).unwrap_or(false),
+        _ => false,
+    };
+
     Worktree {
         path,
         repo_path,
@@ -83,7 +89,36 @@ fn classify(path: PathBuf, repo_path: Option<PathBuf>, is_main: bool) -> Worktre
         last_commit,
         last_modified,
         status,
+        merged,
     }
+}
+
+/// Whether the worktree's HEAD is the default branch tip or an ancestor of it
+/// (i.e. already merged). `None` if it can't be determined.
+fn is_merged(repo: &Repository) -> Option<bool> {
+    let head = repo.head().ok()?.peel_to_commit().ok()?.id();
+    let default_tip = default_branch_tip(repo)?;
+    if head == default_tip {
+        return Some(true);
+    }
+    repo.graph_descendant_of(default_tip, head).ok()
+}
+
+/// Resolve the owning repo's default branch tip: prefer the remote's default
+/// (`origin/HEAD`), then a local `main`, then `master`.
+fn default_branch_tip(repo: &Repository) -> Option<git2::Oid> {
+    for spec in [
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+        "refs/heads/master",
+    ] {
+        if let Ok(obj) = repo.revparse_single(spec)
+            && let Ok(commit) = obj.peel_to_commit()
+        {
+            return Some(commit.id());
+        }
+    }
+    None
 }
 
 /// Read the branch shorthand, short HEAD id, and last commit time from a repo.
@@ -210,6 +245,41 @@ mod tests {
         assert!(w.head.is_some(), "head should be the short commit id");
         assert!(w.last_commit.is_some(), "last_commit should be set");
         assert!(w.last_modified.is_some(), "last_modified should be set");
+    }
+
+    #[test]
+    fn detects_a_merged_worktree() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo); // C1 on main
+        let wt = tmp.path().join("wt");
+        add_worktree(&repo, &wt); // new branch at C1
+        commit(&repo); // C2 on main; the worktree's branch is now an ancestor
+
+        let found = scan(tmp.path()).unwrap();
+        let w = found.iter().find(|w| w.path == wt).unwrap();
+
+        assert!(w.merged, "branch is an ancestor of main, so it is merged");
+    }
+
+    #[test]
+    fn a_worktree_ahead_of_default_is_not_merged() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo); // C1 on main
+        let wt = tmp.path().join("wt");
+        add_worktree(&repo, &wt); // branch at C1
+        commit(&wt); // advance the worktree's own branch ahead of main
+
+        let found = scan(tmp.path()).unwrap();
+        let w = found.iter().find(|w| w.path == wt).unwrap();
+
+        assert!(
+            !w.merged,
+            "branch has commits not on main, so it is not merged"
+        );
     }
 
     #[test]
