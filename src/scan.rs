@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use git2::Repository;
 use ignore::WalkBuilder;
 
+use crate::size::directory_size;
 use crate::worktree::{Worktree, WorktreeStatus};
 
 /// Directory names that never contain worktrees worth scanning and are
@@ -81,6 +82,8 @@ fn classify(path: PathBuf, repo_path: Option<PathBuf>, is_main: bool) -> Worktre
         _ => false,
     };
 
+    let size_bytes = directory_size(&path);
+
     Worktree {
         path,
         repo_path,
@@ -90,6 +93,7 @@ fn classify(path: PathBuf, repo_path: Option<PathBuf>, is_main: bool) -> Worktre
         last_modified,
         status,
         merged,
+        size_bytes,
     }
 }
 
@@ -279,6 +283,26 @@ mod tests {
         assert!(
             !w.merged,
             "branch has commits not on main, so it is not merged"
+        );
+    }
+
+    #[test]
+    fn populates_size_bytes() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt = tmp.path().join("wt");
+        add_worktree(&repo, &wt);
+        std::fs::write(wt.join("big.bin"), vec![0u8; 4096]).unwrap();
+
+        let found = scan(tmp.path()).unwrap();
+        let w = found.iter().find(|w| w.path == wt).unwrap();
+
+        assert!(
+            w.size_bytes >= 4096,
+            "size should include the 4 KB file, got {}",
+            w.size_bytes
         );
     }
 

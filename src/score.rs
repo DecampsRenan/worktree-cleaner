@@ -65,6 +65,7 @@ mod tests {
             last_modified: Some(when),
             status,
             merged: false,
+            size_bytes: 0,
         }
     }
 

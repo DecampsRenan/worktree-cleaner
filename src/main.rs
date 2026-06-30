@@ -1,6 +1,7 @@
 mod delete;
 mod scan;
 mod score;
+mod size;
 #[cfg(test)]
 mod testutil;
 mod tui;
@@ -45,14 +46,29 @@ fn main() -> Result<()> {
     }
 
     let outcomes = delete::delete(&selected, args.dry_run);
-    for outcome in &outcomes {
+    let mut freed = 0u64;
+    let mut would_free = 0u64;
+    for (wt, outcome) in selected.iter().zip(&outcomes) {
         let verb = match outcome.action {
-            DeleteAction::Removed => "removed",
-            DeleteAction::DryRun => "would remove",
+            DeleteAction::Removed => {
+                freed += wt.size_bytes;
+                "removed"
+            }
+            DeleteAction::DryRun => {
+                would_free += wt.size_bytes;
+                "would remove"
+            }
             DeleteAction::Skipped => "skipped",
             DeleteAction::Failed => "FAILED",
         };
         println!("{verb}: {} ({})", outcome.path.display(), outcome.detail);
+    }
+
+    if freed > 0 {
+        println!("Freed {}.", size::format_size(freed));
+    }
+    if would_free > 0 {
+        println!("Would free {}.", size::format_size(would_free));
     }
 
     Ok(())
