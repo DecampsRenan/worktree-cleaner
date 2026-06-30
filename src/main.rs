@@ -26,6 +26,10 @@ struct Args {
     /// Show what would be deleted without removing anything.
     #[arg(long)]
     dry_run: bool,
+
+    /// Force-remove worktrees with uncommitted or untracked changes.
+    #[arg(long)]
+    force: bool,
 }
 
 fn main() -> Result<()> {
@@ -45,7 +49,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let outcomes = delete::delete(&selected, args.dry_run);
+    let outcomes = delete::delete(&selected, args.dry_run, args.force);
     let mut freed = 0u64;
     let mut would_free = 0u64;
     for (wt, outcome) in selected.iter().zip(&outcomes) {
