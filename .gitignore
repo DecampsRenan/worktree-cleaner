@@ -1,1 +1,6 @@
 /target
+
+# Not a Node project — guard against stray npm files (e.g. from `npx`).
+/package.json
+/package-lock.json
+/node_modules
