@@ -1,0 +1,37 @@
+name: Bump Homebrew formula
+
+# When a version tag (v*) is pushed, update the formula in
+# DecampsRenan/homebrew-tap (url + sha256) so
+# `brew install decampsrenan/tap/worktree-cleaner` tracks the new release.
+#
+# Requires a repo secret HOMEBREW_TAP_TOKEN: a GitHub PAT with write access to
+# the tap repo (classic: `repo` scope; fine-grained: Contents read/write on
+# DecampsRenan/homebrew-tap). With write access the bump is pushed directly to
+# the tap's main branch; otherwise the action opens a pull request instead.
+on:
+  push:
+    tags:
+      - "v*"
+  # Manual re-run for an existing tag (e.g. if the token was missing first time).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to bump the formula to (e.g. v0.2.0)"
+        required: true
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bump formula in tap
+        uses: mislav/bump-homebrew-formula-action@v4
+        with:
+          formula-name: worktree-cleaner
+          formula-path: Formula/worktree-cleaner.rb
+          homebrew-tap: DecampsRenan/homebrew-tap
+          base-branch: main
+          tag-name: ${{ github.event.inputs.tag || github.ref_name }}
+          commit-message: |
+            worktree-cleaner {{version}}
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

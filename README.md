@@ -17,6 +17,18 @@ branch is already gone.
 
 ## Install
 
+### Homebrew
+
+```bash
+brew install decampsrenan/tap/worktree-cleaner
+```
+
+This builds from source, so a Rust toolchain is pulled in automatically as a
+build dependency (nothing to install by hand). For the bleeding edge, add
+`--HEAD` to build from the latest `main`.
+
+### From source
+
 ```bash
 cargo install --path .        # installs the `wtc` binary
 # or run without installing:
