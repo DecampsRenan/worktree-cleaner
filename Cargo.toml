@@ -1,6 +1,6 @@
 [package]
 name = "worktree-cleaner"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Traverse a directory tree, find git worktrees, rank them by relevance, and interactively delete orphaned or stale ones."
 license = "MIT"
