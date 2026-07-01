@@ -8,6 +8,11 @@ name: Bump Homebrew formula
 # the tap repo (classic: `repo` scope; fine-grained: Contents read/write on
 # DecampsRenan/homebrew-tap). With write access the bump is pushed directly to
 # the tap's main branch; otherwise the action opens a pull request instead.
+#
+# We compute the source-tarball sha256 ourselves and pass it as download-sha256
+# so the action skips its own tarball fetch. GitHub's archive URLs now answer
+# with HTTP 303 (not 302), which bump-homebrew-formula-action@v4 rejects with
+# "unexpected HTTP 303 response" (mislav/bump-homebrew-formula-action#340).
 on:
   push:
     tags:
@@ -23,6 +28,17 @@ jobs:
   bump:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve tag and source tarball sha256
+        id: src
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          url="https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz"
+          sha=$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Bump formula in tap
         uses: mislav/bump-homebrew-formula-action@v4
         with:
@@ -30,7 +46,9 @@ jobs:
           formula-path: Formula/worktree-cleaner.rb
           homebrew-tap: DecampsRenan/homebrew-tap
           base-branch: main
-          tag-name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag-name: ${{ steps.src.outputs.tag }}
+          download-url: ${{ steps.src.outputs.url }}
+          download-sha256: ${{ steps.src.outputs.sha256 }}
           commit-message: |
             worktree-cleaner {{version}}
         env:
