@@ -9,7 +9,7 @@ mod worktree;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::delete::DeleteAction;
@@ -35,48 +35,61 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let mut worktrees = scan::scan(&args.path)?;
-    score::rank(&mut worktrees);
-
-    if worktrees.is_empty() {
-        println!("No git worktrees found under {}", args.path.display());
-        return Ok(());
+    // Checked up front rather than left to the scanner: a typo'd path would
+    // otherwise just produce a silent, empty "No git worktrees found" TUI
+    // session with no indication anything was wrong.
+    if !args.path.exists() {
+        bail!("path does not exist: {}", args.path.display());
     }
 
-    let selected = tui::select_for_deletion(worktrees)?;
-    if selected.is_empty() {
+    // `tui::run` owns the whole interactive session: it scans in the
+    // background while the list streams in live, lets the user browse and
+    // select before the scan even finishes, and — once confirmed — deletes
+    // the selection in the background too, with live per-item progress. The
+    // TUI itself reports "no worktrees found" if the scan comes up empty, so
+    // there's no separate upfront check here.
+    let results = tui::run(args.path, args.dry_run, args.force)?;
+    if results.is_empty() {
         println!("Nothing selected.");
         return Ok(());
     }
 
-    let outcomes = delete::delete(&selected, args.dry_run, args.force);
     let mut freed = 0u64;
+    let mut freed_partial = false;
     let mut would_free = 0u64;
-    for (wt, outcome) in selected.iter().zip(&outcomes) {
-        let verb = match outcome.action {
-            DeleteAction::Removed => {
-                freed += wt.size_bytes;
-                "removed"
-            }
-            DeleteAction::DryRun => {
-                would_free += wt.size_bytes;
-                "would remove"
-            }
-            DeleteAction::Skipped => "skipped",
-            DeleteAction::Failed => "FAILED",
-        };
+    let mut would_free_partial = false;
+    for (wt, outcome) in &results {
+        // A worktree's size can in rare cases still be unknown here (e.g.
+        // confirmed for deletion before its background size computation
+        // finished, and the process exited before that arrived) — track
+        // that rather than silently treating it as 0, so the total below
+        // can honestly say ">= N" instead of undercounting.
+        match outcome.action {
+            DeleteAction::Removed => match wt.size_bytes {
+                Some(bytes) => freed += bytes,
+                None => freed_partial = true,
+            },
+            DeleteAction::DryRun => match wt.size_bytes {
+                Some(bytes) => would_free += bytes,
+                None => would_free_partial = true,
+            },
+            DeleteAction::Skipped | DeleteAction::Failed => {}
+        }
         println!(
-            "{verb}: {} ({})",
+            "{}: {} ({})",
+            outcome.action.verb(),
             tui::display_path(&outcome.path),
             outcome.detail
         );
     }
 
-    if freed > 0 {
-        println!("Freed {}.", size::format_size(freed));
+    if freed > 0 || freed_partial {
+        let prefix = if freed_partial { ">= " } else { "" };
+        println!("Freed {prefix}{}.", size::format_size(freed));
     }
-    if would_free > 0 {
-        println!("Would free {}.", size::format_size(would_free));
+    if would_free > 0 || would_free_partial {
+        let prefix = if would_free_partial { ">= " } else { "" };
+        println!("Would free {prefix}{}.", size::format_size(would_free));
     }
 
     Ok(())
