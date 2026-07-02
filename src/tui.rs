@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout};
@@ -168,7 +170,7 @@ fn render(frame: &mut Frame, selector: &Selector) {
                 format_size(w.size_bytes),
                 branch,
                 w.head.as_deref().unwrap_or("-"),
-                w.path.display(),
+                display_path(&w.path),
             );
             ListItem::new(text).style(Style::default().fg(status_color(w.status)))
         })
@@ -197,6 +199,20 @@ fn render(frame: &mut Frame, selector: &Selector) {
     ))
     .style(Style::default().add_modifier(Modifier::DIM));
     frame.render_widget(footer, footer_area);
+}
+
+/// Render `path` relative to the current directory when possible, for
+/// readability — worktree paths are always absolute internally so that
+/// deletion works regardless of the scan root, but a full absolute path is
+/// noisy to read when the user is sitting right above it.
+fn display_path(path: &Path) -> String {
+    match std::env::current_dir() {
+        Ok(cwd) => match path.strip_prefix(&cwd) {
+            Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+            _ => path.display().to_string(),
+        },
+        Err(_) => path.display().to_string(),
+    }
 }
 
 fn status_color(status: WorktreeStatus) -> Color {
@@ -319,5 +335,26 @@ mod tests {
         s.toggle(); // /c (400)
 
         assert_eq!(s.selected_size(), 500);
+    }
+
+    #[test]
+    fn display_path_shortens_paths_under_the_current_directory() {
+        use crate::testutil::CwdGuard;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        // `Worktree::path` is always canonicalized by `scan` in real usage
+        // (e.g. resolving macOS's `/var` -> `/private/var`), so mirror that
+        // here rather than passing the tempdir's raw, possibly-symlinked path.
+        let nested = nested.canonicalize().unwrap();
+        let _cwd_guard = CwdGuard::change_to(tmp.path());
+
+        assert_eq!(display_path(&nested), "nested");
+        // A path outside the cwd falls back to the full (absolute) path.
+        assert_eq!(
+            display_path(Path::new("/definitely/outside")),
+            "/definitely/outside"
+        );
     }
 }

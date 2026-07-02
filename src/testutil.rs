@@ -1,9 +1,43 @@
 //! Shared git fixture helpers for tests.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::worktree::{Worktree, WorktreeStatus};
+
+/// Serializes tests that change the process's current directory. Changing
+/// `cwd` is process-global, so without this, tests that rely on it would
+/// race with each other under the default parallel test runner.
+static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Changes the process's current directory for the lifetime of the guard,
+/// holding a process-wide lock and restoring the original directory on drop.
+pub struct CwdGuard {
+    original: PathBuf,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl CwdGuard {
+    pub fn change_to(dir: &Path) -> Self {
+        let lock = CWD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::current_dir().expect("current dir should be readable");
+        std::env::set_current_dir(dir).expect("should be able to chdir into the given directory");
+        Self {
+            original,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
 
 /// Build a bare [`Worktree`] with the given path and status (no git metadata),
 /// for testing pure logic that only depends on those fields.

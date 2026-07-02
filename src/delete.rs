@@ -92,30 +92,39 @@ fn remove_one(wt: &Worktree, dry_run: bool, force: bool) -> DeleteOutcome {
 }
 
 /// Run `git -C <repo_dir> worktree remove [--force] <path>`.
+///
+/// `git -C` changes directory before resolving `path`, so a relative `path`
+/// would be resolved against `repo_dir` instead of the caller's cwd. `scan`
+/// already resolves `Worktree::path` to an absolute path for this reason;
+/// canonicalizing again here is defense-in-depth for any other caller.
 fn git_worktree_remove(repo_dir: &Path, path: &Path, force: bool) -> std::io::Result<Output> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_dir).args(["worktree", "remove"]);
     if force {
         cmd.arg("--force");
     }
-    cmd.arg(path).output()
+    cmd.arg(target).output()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scan::scan;
-    use crate::testutil::{add_worktree, commit, git, init_repo};
+    use crate::testutil::{CwdGuard, add_worktree, commit, git, init_repo};
     use crate::worktree::WorktreeStatus;
     use std::path::Path;
     use tempfile::tempdir;
 
-    /// Run a scan and return the discovered worktree at `path`.
+    /// Run a scan and return the discovered worktree at `path`. `scan`
+    /// resolves paths to their canonical absolute form, so `path` is
+    /// canonicalized here too before comparing.
     fn discover(root: &Path, path: &Path) -> Worktree {
+        let canon = path.canonicalize().expect("path should exist");
         scan(root)
             .unwrap()
             .into_iter()
-            .find(|w| w.path == path)
+            .find(|w| w.path == canon)
             .expect("worktree should be discovered")
     }
 
@@ -288,5 +297,41 @@ mod tests {
             "dry run must not remove even with --force"
         );
         assert_eq!(outcomes[0].action, DeleteAction::DryRun);
+    }
+
+    #[test]
+    fn removes_a_linked_worktree_when_scanned_from_a_relative_root() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt_path = tmp.path().join("wt");
+        add_worktree(&repo, &wt_path);
+
+        // Regression test for a bug where `scan` kept worktree paths relative
+        // to the (relative) scan root, but the owning repo's dir came back
+        // absolute from the `.git` file's `gitdir:` pointer. `git -C
+        // <absolute repo dir> worktree remove <relative path>` then resolved
+        // the relative path against the repo dir instead of the real cwd,
+        // and git refused to remove it ("is not a working tree").
+        let _cwd_guard = CwdGuard::change_to(tmp.path());
+        let found = scan(Path::new(".")).unwrap();
+        let wt = found
+            .into_iter()
+            .find(|w| w.path == wt_path.canonicalize().unwrap())
+            .expect("linked worktree should be discovered from a relative root");
+
+        let outcomes = delete(&[wt], false, false);
+
+        assert_eq!(
+            outcomes[0].action,
+            DeleteAction::Removed,
+            "detail: {}",
+            outcomes[0].detail
+        );
+        assert!(
+            !wt_path.exists(),
+            "worktree directory should be gone after removal from a relative root"
+        );
     }
 }
