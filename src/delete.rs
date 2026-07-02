@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use crate::scan::canonicalize_path;
 use crate::worktree::{Worktree, WorktreeStatus};
 
 /// What happened (or would happen) to a worktree during deletion.
@@ -93,14 +94,17 @@ fn remove_one(wt: &Worktree, dry_run: bool, force: bool) -> DeleteOutcome {
 
 /// Run `git -C <repo_dir> worktree remove [--force] <path>`.
 ///
-/// `git -C` changes directory before resolving `path`, so a relative `path`
-/// would be resolved against `repo_dir` instead of the caller's cwd. `scan`
-/// already resolves `Worktree::path` to an absolute path for this reason;
-/// canonicalizing again here is defense-in-depth for any other caller.
+/// `git -C` changes directory before resolving `path`, so a non-absolute
+/// `path` is resolved unreliably (e.g. a `./`-prefixed one resolves literally
+/// and fails to match the registered worktree). `scan` already resolves
+/// `Worktree::path` and `Worktree::repo_path` to absolute paths for this
+/// reason; canonicalizing both again here is defense-in-depth for any other
+/// caller.
 fn git_worktree_remove(repo_dir: &Path, path: &Path, force: bool) -> std::io::Result<Output> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let repo_dir = canonicalize_path(repo_dir);
+    let target = canonicalize_path(path);
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo_dir).args(["worktree", "remove"]);
+    cmd.arg("-C").arg(&repo_dir).args(["worktree", "remove"]);
     if force {
         cmd.arg("--force");
     }
@@ -381,6 +385,36 @@ mod tests {
         assert!(
             !wt_path.exists(),
             "worktree directory should be gone after removal via a relative path"
+        );
+    }
+
+    #[test]
+    fn git_worktree_remove_succeeds_with_a_relative_repo_dir() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt_path = tmp.path().join("wt");
+        add_worktree(&repo, &wt_path);
+
+        // Hardening, not a bug fix: `repo_path` is always absolute in
+        // practice (git writes an absolute `gitdir:` pointer), so this path
+        // is only reachable via a hand-corrupted `.git` file. Canonicalize
+        // `repo_dir` too, for the same defense-in-depth reason as `path`.
+        let _cwd_guard = CwdGuard::change_to(tmp.path());
+        let relative_repo_dir = Path::new("./repo");
+        assert!(relative_repo_dir.is_relative());
+
+        let output = git_worktree_remove(relative_repo_dir, &wt_path, false).unwrap();
+
+        assert!(
+            output.status.success(),
+            "git worktree remove should succeed given a relative repo_dir, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !wt_path.exists(),
+            "worktree directory should be gone after removal via a relative repo_dir"
         );
     }
 }

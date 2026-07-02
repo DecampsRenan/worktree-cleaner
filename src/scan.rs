@@ -47,7 +47,7 @@ pub fn scan(root: &Path) -> Result<Vec<Worktree>> {
         // `.git` file (containing a `gitdir:` pointer) marks a linked worktree.
         let is_main = git_path.is_dir();
         let repo_path = if is_main {
-            Some(worktree_dir.join(".git"))
+            Some(canonicalize_path(git_path))
         } else {
             linked_repo_path(git_path).map(|p| canonicalize_path(&p))
         };
@@ -61,7 +61,14 @@ pub fn scan(root: &Path) -> Result<Vec<Worktree>> {
 /// Best-effort canonicalization: resolves symlinks (e.g. macOS's `/var` ->
 /// `/private/var`) and makes relative paths absolute. Falls back to the
 /// original path if canonicalization fails (e.g. it no longer exists).
-fn canonicalize_path(path: &Path) -> PathBuf {
+///
+/// Shared with `delete::git_worktree_remove`, which uses it as
+/// defense-in-depth for the same reason `scan` uses it here: `git -C
+/// <repo_dir> worktree remove <path>` resolves a non-absolute `path`
+/// unreliably (relative to the caller's cwd for some forms, literally for
+/// others, e.g. a `./`-prefixed one), so every path git sees should already
+/// be absolute.
+pub(crate) fn canonicalize_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
