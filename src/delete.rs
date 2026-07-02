@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use crate::scan::canonicalize_path;
 use crate::worktree::{Worktree, WorktreeStatus};
 
 /// What happened (or would happen) to a worktree during deletion.
@@ -92,30 +93,42 @@ fn remove_one(wt: &Worktree, dry_run: bool, force: bool) -> DeleteOutcome {
 }
 
 /// Run `git -C <repo_dir> worktree remove [--force] <path>`.
+///
+/// `git -C` changes directory before resolving `path`, so a non-absolute
+/// `path` is resolved unreliably (e.g. a `./`-prefixed one resolves literally
+/// and fails to match the registered worktree). `scan` already resolves
+/// `Worktree::path` and `Worktree::repo_path` to absolute paths for this
+/// reason; canonicalizing both again here is defense-in-depth for any other
+/// caller.
 fn git_worktree_remove(repo_dir: &Path, path: &Path, force: bool) -> std::io::Result<Output> {
+    let repo_dir = canonicalize_path(repo_dir);
+    let target = canonicalize_path(path);
     let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(repo_dir).args(["worktree", "remove"]);
+    cmd.arg("-C").arg(&repo_dir).args(["worktree", "remove"]);
     if force {
         cmd.arg("--force");
     }
-    cmd.arg(path).output()
+    cmd.arg(target).output()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scan::scan;
-    use crate::testutil::{add_worktree, commit, git, init_repo};
+    use crate::testutil::{CwdGuard, add_worktree, commit, git, init_repo};
     use crate::worktree::WorktreeStatus;
     use std::path::Path;
     use tempfile::tempdir;
 
-    /// Run a scan and return the discovered worktree at `path`.
+    /// Run a scan and return the discovered worktree at `path`. `scan`
+    /// resolves paths to their canonical absolute form, so `path` is
+    /// canonicalized here too before comparing.
     fn discover(root: &Path, path: &Path) -> Worktree {
+        let canon = path.canonicalize().expect("path should exist");
         scan(root)
             .unwrap()
             .into_iter()
-            .find(|w| w.path == path)
+            .find(|w| w.path == canon)
             .expect("worktree should be discovered")
     }
 
@@ -288,5 +301,90 @@ mod tests {
             "dry run must not remove even with --force"
         );
         assert_eq!(outcomes[0].action, DeleteAction::DryRun);
+    }
+
+    #[test]
+    fn removes_a_linked_worktree_when_scanned_from_a_relative_root() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt_path = tmp.path().join("wt");
+        add_worktree(&repo, &wt_path);
+
+        // Regression test for a bug where `scan` kept worktree paths relative
+        // to the (relative) scan root, but the owning repo's dir came back
+        // absolute from the `.git` file's `gitdir:` pointer. `git -C
+        // <absolute repo dir> worktree remove <relative path>` then resolved
+        // the relative path against the repo dir instead of the real cwd,
+        // and git refused to remove it ("is not a working tree").
+        let _cwd_guard = CwdGuard::change_to(tmp.path());
+        let found = scan(Path::new(".")).unwrap();
+        let wt = found
+            .into_iter()
+            .find(|w| w.path == wt_path.canonicalize().unwrap())
+            .expect("linked worktree should be discovered from a relative root");
+        // `scan`'s own canonicalization is the layer under test here; assert
+        // on it directly so this test doesn't pass merely because
+        // `git_worktree_remove`'s defense-in-depth canonicalize (below) masks
+        // a regression in `scan`.
+        assert!(
+            wt.path.is_absolute(),
+            "scan should resolve paths to absolute even from a relative root, got {:?}",
+            wt.path
+        );
+
+        let outcomes = delete(&[wt], false, false);
+
+        assert_eq!(
+            outcomes[0].action,
+            DeleteAction::Removed,
+            "detail: {}",
+            outcomes[0].detail
+        );
+        assert!(
+            !wt_path.exists(),
+            "worktree directory should be gone after removal from a relative root"
+        );
+    }
+
+    #[test]
+    fn git_worktree_remove_succeeds_with_a_relative_path() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt_path = tmp.path().join("wt");
+        add_worktree(&repo, &wt_path);
+
+        // Exercises `git_worktree_remove`'s own canonicalize step in
+        // isolation, independent of `scan`, so a regression there can't be
+        // masked by `scan` already having done the job (see
+        // `removes_a_linked_worktree_when_scanned_from_a_relative_root`,
+        // which covers the two layers together).
+        //
+        // The `./`-prefixed form matters: `ignore::WalkBuilder::new(".")` (as
+        // used by `scan` before it canonicalizes) yields entries exactly like
+        // `./wt`, and `git -C <repo dir> worktree remove ./wt` fails with
+        // "is not a working tree" — a bare `wt` (no `./`) happens to still
+        // resolve correctly, so it wouldn't have caught this bug.
+        let _cwd_guard = CwdGuard::change_to(tmp.path());
+        let relative_wt_path = Path::new("./wt");
+        assert!(
+            relative_wt_path.is_relative(),
+            "precondition: the path handed to git_worktree_remove must be relative"
+        );
+
+        let output = git_worktree_remove(&repo, relative_wt_path, false).unwrap();
+
+        assert!(
+            output.status.success(),
+            "git worktree remove should succeed given a relative path, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !wt_path.exists(),
+            "worktree directory should be gone after removal via a relative path"
+        );
     }
 }

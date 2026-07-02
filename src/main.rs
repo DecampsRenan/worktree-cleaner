@@ -65,7 +65,11 @@ fn main() -> Result<()> {
             DeleteAction::Skipped => "skipped",
             DeleteAction::Failed => "FAILED",
         };
-        println!("{verb}: {} ({})", outcome.path.display(), outcome.detail);
+        println!(
+            "{verb}: {} ({})",
+            tui::display_path(&outcome.path),
+            outcome.detail
+        );
     }
 
     if freed > 0 {

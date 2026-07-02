@@ -38,20 +38,38 @@ pub fn scan(root: &Path) -> Result<Vec<Worktree>> {
         let Some(worktree_dir) = git_path.parent() else {
             continue;
         };
+        // Resolve to an absolute, symlink-free path so it matches how git
+        // identifies worktrees internally (and stays consistent regardless of
+        // whether `root` was given as relative or absolute).
+        let worktree_dir = canonicalize_path(worktree_dir);
 
         // A `.git` directory marks the main working tree of a repository; a
         // `.git` file (containing a `gitdir:` pointer) marks a linked worktree.
         let is_main = git_path.is_dir();
         let repo_path = if is_main {
-            Some(git_path.to_path_buf())
+            Some(canonicalize_path(git_path))
         } else {
-            linked_repo_path(git_path)
+            linked_repo_path(git_path).map(|p| canonicalize_path(&p))
         };
 
-        found.push(classify(worktree_dir.to_path_buf(), repo_path, is_main));
+        found.push(classify(worktree_dir, repo_path, is_main));
     }
 
     Ok(found)
+}
+
+/// Best-effort canonicalization: resolves symlinks (e.g. macOS's `/var` ->
+/// `/private/var`) and makes relative paths absolute. Falls back to the
+/// original path if canonicalization fails (e.g. it no longer exists).
+///
+/// Shared with `delete::git_worktree_remove`, which uses it as
+/// defense-in-depth for the same reason `scan` uses it here: `git -C
+/// <repo_dir> worktree remove <path>` resolves a non-absolute `path`
+/// unreliably (relative to the caller's cwd for some forms, literally for
+/// others, e.g. a `./`-prefixed one), so every path git sees should already
+/// be absolute.
+pub(crate) fn canonicalize_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Build a fully-classified [`Worktree`] for a discovered worktree directory.
@@ -184,6 +202,12 @@ mod tests {
         p
     }
 
+    /// Canonicalize an expected path the same way `scan` does, for
+    /// comparison against discovered worktrees.
+    fn canon(p: &Path) -> PathBuf {
+        p.canonicalize().unwrap()
+    }
+
     #[test]
     fn finds_a_main_working_tree() {
         let tmp = tempdir().unwrap();
@@ -192,7 +216,7 @@ mod tests {
 
         let found = scan(tmp.path()).unwrap();
 
-        assert_eq!(paths(&found), vec![repo.clone()]);
+        assert_eq!(paths(&found), vec![canon(&repo)]);
         assert_eq!(found[0].status, WorktreeStatus::MainRepo);
     }
 
@@ -209,9 +233,13 @@ mod tests {
         let found = scan(tmp.path()).unwrap();
 
         // Both the main working tree and the linked worktree are discovered.
-        assert_eq!(paths(&found), vec![repo.clone(), wt.clone()]);
+        assert_eq!(paths(&found), {
+            let mut expected = vec![canon(&repo), canon(&wt)];
+            expected.sort();
+            expected
+        });
 
-        let linked = found.iter().find(|w| w.path == wt).unwrap();
+        let linked = found.iter().find(|w| w.path == canon(&wt)).unwrap();
         assert_ne!(linked.status, WorktreeStatus::MainRepo);
         // Its repo_path points back at the owning repo's `.git` directory.
         assert_eq!(
@@ -231,7 +259,7 @@ mod tests {
 
         let found = scan(tmp.path()).unwrap();
 
-        assert_eq!(paths(&found), vec![repo.clone()]);
+        assert_eq!(paths(&found), vec![canon(&repo)]);
     }
 
     #[test]
@@ -262,7 +290,7 @@ mod tests {
         commit(&repo); // C2 on main; the worktree's branch is now an ancestor
 
         let found = scan(tmp.path()).unwrap();
-        let w = found.iter().find(|w| w.path == wt).unwrap();
+        let w = found.iter().find(|w| w.path == canon(&wt)).unwrap();
 
         assert!(w.merged, "branch is an ancestor of main, so it is merged");
     }
@@ -278,7 +306,7 @@ mod tests {
         commit(&wt); // advance the worktree's own branch ahead of main
 
         let found = scan(tmp.path()).unwrap();
-        let w = found.iter().find(|w| w.path == wt).unwrap();
+        let w = found.iter().find(|w| w.path == canon(&wt)).unwrap();
 
         assert!(
             !w.merged,
@@ -297,7 +325,7 @@ mod tests {
         std::fs::write(wt.join("big.bin"), vec![0u8; 4096]).unwrap();
 
         let found = scan(tmp.path()).unwrap();
-        let w = found.iter().find(|w| w.path == wt).unwrap();
+        let w = found.iter().find(|w| w.path == canon(&wt)).unwrap();
 
         assert!(
             w.size_bytes >= 4096,
@@ -320,7 +348,7 @@ mod tests {
 
         let found = scan(tmp.path()).unwrap();
 
-        assert_eq!(paths(&found), vec![wt.clone()]);
+        assert_eq!(paths(&found), vec![canon(&wt)]);
         assert_eq!(found[0].status, WorktreeStatus::Orphaned);
     }
 
@@ -343,9 +371,36 @@ mod tests {
         add_worktree(&active_repo, &active_wt);
 
         let found = scan(tmp.path()).unwrap();
-        let by_path = |p: &Path| found.iter().find(|w| w.path == p).unwrap();
+        let by_path = |p: &Path| found.iter().find(|w| w.path == canon(p)).unwrap();
 
         assert_eq!(by_path(&stale_wt).status, WorktreeStatus::Stale);
         assert_eq!(by_path(&active_wt).status, WorktreeStatus::Active);
+    }
+
+    #[test]
+    fn resolves_paths_to_absolute_even_from_a_relative_root() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt = tmp.path().join("wt");
+        add_worktree(&repo, &wt);
+
+        // Give `scan` a relative root, as `wtc` does by default (`.`).
+        let _cwd_guard = crate::testutil::CwdGuard::change_to(tmp.path());
+        let found = scan(Path::new(".")).unwrap();
+
+        for w in &found {
+            assert!(
+                w.path.is_absolute(),
+                "path should be absolute even when the scan root is relative, got {:?}",
+                w.path
+            );
+        }
+        assert_eq!(paths(&found), {
+            let mut expected = vec![canon(&repo), canon(&wt)];
+            expected.sort();
+            expected
+        });
     }
 }
