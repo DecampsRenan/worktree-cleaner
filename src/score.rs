@@ -39,15 +39,6 @@ fn age_factor(wt: &Worktree) -> f64 {
     }
 }
 
-/// Sort worktrees in place so the strongest deletion candidates come first.
-pub fn rank(worktrees: &mut [Worktree]) {
-    worktrees.sort_by(|a, b| {
-        relevance(b)
-            .partial_cmp(&relevance(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,7 +56,7 @@ mod tests {
             last_modified: Some(when),
             status,
             merged: false,
-            size_bytes: 0,
+            size_bytes: None,
         }
     }
 
@@ -76,73 +67,53 @@ mod tests {
         }
     }
 
-    fn statuses(worktrees: &[Worktree]) -> Vec<WorktreeStatus> {
-        worktrees.iter().map(|w| w.status).collect()
-    }
+    // These used to assert on the result of sorting a `Vec` with the now-
+    // removed `rank()` (superseded by `Selector::insert_found`, which keeps
+    // the live TUI list ordered incrementally via this same `relevance()` —
+    // see tui.rs). Ported to direct comparisons so the underlying ordering
+    // guarantees `rank()` used to provide stay covered.
 
     #[test]
-    fn ranks_orphaned_above_stale_above_active_and_main_last() {
-        let mut v = vec![
-            wt(WorktreeStatus::Active, 1),
-            wt(WorktreeStatus::MainRepo, 1),
-            wt(WorktreeStatus::Orphaned, 1),
-            wt(WorktreeStatus::Stale, 1),
-        ];
-
-        rank(&mut v);
-
-        assert_eq!(
-            statuses(&v),
-            vec![
-                WorktreeStatus::Orphaned,
-                WorktreeStatus::Stale,
-                WorktreeStatus::Active,
-                WorktreeStatus::MainRepo,
-            ]
-        );
-    }
-
-    #[test]
-    fn older_worktrees_rank_higher_within_a_status() {
-        let mut v = vec![
-            wt(WorktreeStatus::Stale, 10),
-            wt(WorktreeStatus::Stale, 200),
-            wt(WorktreeStatus::Stale, 50),
-        ];
-
-        rank(&mut v);
-
-        // Oldest first ⇒ ascending timestamps down the list.
-        let times: Vec<_> = v.iter().map(|w| w.last_commit.unwrap()).collect();
+    fn orphaned_outranks_stale_outranks_active() {
         assert!(
-            times[0] < times[1] && times[1] < times[2],
-            "expected oldest first"
+            relevance(&wt(WorktreeStatus::Orphaned, 1)) > relevance(&wt(WorktreeStatus::Stale, 1))
         );
+        assert!(
+            relevance(&wt(WorktreeStatus::Stale, 1)) > relevance(&wt(WorktreeStatus::Active, 1))
+        );
+    }
+
+    #[test]
+    fn main_repo_is_never_a_deletion_candidate() {
+        assert_eq!(
+            relevance(&wt(WorktreeStatus::MainRepo, 1)),
+            f64::NEG_INFINITY
+        );
+    }
+
+    #[test]
+    fn older_worktrees_score_higher_within_a_status() {
+        let newer = wt(WorktreeStatus::Stale, 10);
+        let middle = wt(WorktreeStatus::Stale, 50);
+        let older = wt(WorktreeStatus::Stale, 200);
+
+        assert!(relevance(&older) > relevance(&middle));
+        assert!(relevance(&middle) > relevance(&newer));
     }
 
     #[test]
     fn an_ancient_main_repo_never_outranks_a_fresh_candidate() {
-        let mut v = vec![
-            wt(WorktreeStatus::MainRepo, 9999),
-            wt(WorktreeStatus::Active, 0),
-        ];
+        let ancient_main = wt(WorktreeStatus::MainRepo, 9999);
+        let fresh_active = wt(WorktreeStatus::Active, 0);
 
-        rank(&mut v);
-
-        assert_eq!(v[0].status, WorktreeStatus::Active);
-        assert_eq!(v[1].status, WorktreeStatus::MainRepo);
+        assert!(relevance(&fresh_active) > relevance(&ancient_main));
     }
 
     #[test]
-    fn merged_worktrees_rank_above_unmerged_peers() {
-        let mut v = vec![
-            wt(WorktreeStatus::Stale, 30),        // unmerged
-            merged_wt(WorktreeStatus::Stale, 30), // merged, same status and age
-        ];
+    fn merged_worktrees_score_higher_than_unmerged_peers() {
+        let unmerged = wt(WorktreeStatus::Stale, 30);
+        let merged = merged_wt(WorktreeStatus::Stale, 30); // same status and age
 
-        rank(&mut v);
-
-        assert!(v[0].merged, "the merged worktree should rank first");
-        assert!(!v[1].merged);
+        assert!(relevance(&merged) > relevance(&unmerged));
     }
 }

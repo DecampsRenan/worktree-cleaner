@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::mpsc;
 
 use crate::scan::canonicalize_path;
 use crate::worktree::{Worktree, WorktreeStatus};
@@ -17,8 +18,22 @@ pub enum DeleteAction {
     Failed,
 }
 
+impl DeleteAction {
+    /// Short verb describing this outcome, shared by the TUI's live
+    /// deletion view and the post-exit printed summary so both read
+    /// consistently.
+    pub fn verb(&self) -> &'static str {
+        match self {
+            DeleteAction::Removed => "removed",
+            DeleteAction::DryRun => "would remove",
+            DeleteAction::Skipped => "skipped",
+            DeleteAction::Failed => "FAILED",
+        }
+    }
+}
+
 /// The outcome of attempting to delete one worktree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteOutcome {
     pub path: PathBuf,
     pub action: DeleteAction,
@@ -31,11 +46,58 @@ pub struct DeleteOutcome {
 /// is removed and every outcome is [`DeleteAction::DryRun`]. With `force`, a
 /// worktree that `git worktree remove` refuses (dirty/untracked changes) is
 /// retried with `--force`; without it, such a worktree is left as `Failed`.
+///
+/// The production binary uses [`delete_streaming`] instead, so progress is
+/// visible as it happens; this batch form (return everything at once) is
+/// kept as a test utility — simpler to assert a full report against than
+/// draining a channel.
+#[cfg(test)]
 pub fn delete(worktrees: &[Worktree], dry_run: bool, force: bool) -> Vec<DeleteOutcome> {
     worktrees
         .iter()
         .map(|wt| remove_one(wt, dry_run, force))
         .collect()
+}
+
+/// An event emitted while a [`delete_streaming`] deletion run is in
+/// progress.
+#[derive(Debug)]
+pub enum DeleteEvent {
+    /// About to attempt removal of the worktree at this path.
+    Deleting(PathBuf),
+    /// The outcome of one worktree's removal attempt.
+    Deleted(DeleteOutcome),
+    /// Every worktree has been processed.
+    Done,
+}
+
+/// Streaming counterpart to [`delete`]: removes `worktrees` one at a time,
+/// on the calling thread, sending a [`DeleteEvent`] before and after each
+/// one instead of returning a batch report. Meant to be run on its own
+/// thread (e.g. via `thread::spawn`) since it blocks until every worktree
+/// has been processed.
+///
+/// Deletions run sequentially rather than in parallel: `git worktree
+/// remove` mutates the owning repo's shared `.git/worktrees` administrative
+/// area, and removing several worktrees of the *same* repo concurrently
+/// would race on that state. The actual removal logic is unchanged from
+/// [`delete`] — this only adds progress events around it.
+pub fn delete_streaming(
+    worktrees: Vec<Worktree>,
+    dry_run: bool,
+    force: bool,
+    tx: mpsc::Sender<DeleteEvent>,
+) {
+    for wt in &worktrees {
+        if tx.send(DeleteEvent::Deleting(wt.path.clone())).is_err() {
+            return;
+        }
+        let outcome = remove_one(wt, dry_run, force);
+        if tx.send(DeleteEvent::Deleted(outcome)).is_err() {
+            return;
+        }
+    }
+    let _ = tx.send(DeleteEvent::Done);
 }
 
 fn remove_one(wt: &Worktree, dry_run: bool, force: bool) -> DeleteOutcome {
@@ -232,7 +294,7 @@ mod tests {
             last_modified: None,
             status: WorktreeStatus::Stale,
             merged: false,
-            size_bytes: 0,
+            size_bytes: None,
         };
 
         let outcomes = delete(&[bogus, healthy], false, false);
@@ -386,5 +448,76 @@ mod tests {
             !wt_path.exists(),
             "worktree directory should be gone after removal via a relative path"
         );
+    }
+
+    #[test]
+    fn delete_streaming_reports_progress_and_matches_the_batch_outcome() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt_path = tmp.path().join("wt");
+        add_worktree(&repo, &wt_path);
+
+        let wt = discover(tmp.path(), &wt_path);
+        // Captured before deletion runs: `wt_path` won't exist to
+        // canonicalize afterwards.
+        let wt_path_canon = wt_path.canonicalize().unwrap();
+        let (tx, rx) = mpsc::channel();
+        delete_streaming(vec![wt], false, false, tx);
+
+        let events: Vec<_> = rx.iter().collect();
+        assert!(
+            matches!(events.first(), Some(DeleteEvent::Deleting(p)) if *p == wt_path_canon),
+            "should announce the worktree before removing it, got {events:?}"
+        );
+        assert!(
+            matches!(events.get(1), Some(DeleteEvent::Deleted(o)) if o.action == DeleteAction::Removed),
+            "should report the removal outcome, got {events:?}"
+        );
+        assert!(
+            matches!(events.get(2), Some(DeleteEvent::Done)),
+            "should signal completion last, got {events:?}"
+        );
+        assert!(!wt_path.exists(), "worktree directory should be gone");
+    }
+
+    #[test]
+    fn delete_streaming_keeps_going_after_one_failure() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt_path = tmp.path().join("wt");
+        add_worktree(&repo, &wt_path);
+        let healthy = discover(tmp.path(), &wt_path);
+
+        let bogus = Worktree {
+            path: tmp.path().join("nope"),
+            repo_path: None,
+            branch: None,
+            head: None,
+            last_commit: None,
+            last_modified: None,
+            status: WorktreeStatus::Stale,
+            merged: false,
+            size_bytes: None,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        delete_streaming(vec![bogus, healthy], false, false, tx);
+
+        let outcomes: Vec<DeleteOutcome> = rx
+            .iter()
+            .filter_map(|e| match e {
+                DeleteEvent::Deleted(o) => Some(o),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].action, DeleteAction::Failed);
+        assert_eq!(outcomes[1].action, DeleteAction::Removed);
+        assert!(!wt_path.exists(), "the healthy worktree was still removed");
     }
 }

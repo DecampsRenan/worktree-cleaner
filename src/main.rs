@@ -9,7 +9,7 @@ mod worktree;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::delete::DeleteAction;
@@ -35,38 +35,36 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let mut worktrees = scan::scan(&args.path)?;
-    score::rank(&mut worktrees);
-
-    if worktrees.is_empty() {
-        println!("No git worktrees found under {}", args.path.display());
-        return Ok(());
+    // Checked up front rather than left to the scanner: a typo'd path would
+    // otherwise just produce a silent, empty "No git worktrees found" TUI
+    // session with no indication anything was wrong.
+    if !args.path.exists() {
+        bail!("path does not exist: {}", args.path.display());
     }
 
-    let selected = tui::select_for_deletion(worktrees)?;
-    if selected.is_empty() {
+    // `tui::run` owns the whole interactive session: it scans in the
+    // background while the list streams in live, lets the user browse and
+    // select before the scan even finishes, and — once confirmed — deletes
+    // the selection in the background too, with live per-item progress. The
+    // TUI itself reports "no worktrees found" if the scan comes up empty, so
+    // there's no separate upfront check here.
+    let results = tui::run(args.path, args.dry_run, args.force)?;
+    if results.is_empty() {
         println!("Nothing selected.");
         return Ok(());
     }
 
-    let outcomes = delete::delete(&selected, args.dry_run, args.force);
     let mut freed = 0u64;
     let mut would_free = 0u64;
-    for (wt, outcome) in selected.iter().zip(&outcomes) {
-        let verb = match outcome.action {
-            DeleteAction::Removed => {
-                freed += wt.size_bytes;
-                "removed"
-            }
-            DeleteAction::DryRun => {
-                would_free += wt.size_bytes;
-                "would remove"
-            }
-            DeleteAction::Skipped => "skipped",
-            DeleteAction::Failed => "FAILED",
-        };
+    for (wt, outcome) in &results {
+        match outcome.action {
+            DeleteAction::Removed => freed += wt.size_bytes.unwrap_or(0),
+            DeleteAction::DryRun => would_free += wt.size_bytes.unwrap_or(0),
+            DeleteAction::Skipped | DeleteAction::Failed => {}
+        }
         println!(
-            "{verb}: {} ({})",
+            "{}: {} ({})",
+            outcome.action.verb(),
             tui::display_path(&outcome.path),
             outcome.detail
         );

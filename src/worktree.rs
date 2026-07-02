@@ -22,8 +22,11 @@ pub struct Worktree {
     /// Whether this worktree's HEAD is already merged into the owning repo's
     /// default branch (a strong hint it's safe to delete). `false` when unknown.
     pub merged: bool,
-    /// On-disk size of the worktree directory in bytes (what removing it frees).
-    pub size_bytes: u64,
+    /// On-disk size of the worktree directory in bytes (what removing it
+    /// frees). `None` means not yet computed — the streaming scanner reports
+    /// worktrees before their (potentially expensive) size is known, and a
+    /// background worker fills this in shortly after via `ScanEvent::Size`.
+    pub size_bytes: Option<u64>,
 }
 
 /// Why a worktree might (or might not) be a deletion candidate.
