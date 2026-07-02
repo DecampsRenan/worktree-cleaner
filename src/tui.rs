@@ -204,8 +204,9 @@ fn render(frame: &mut Frame, selector: &Selector) {
 /// Render `path` relative to the current directory when possible, for
 /// readability — worktree paths are always absolute internally so that
 /// deletion works regardless of the scan root, but a full absolute path is
-/// noisy to read when the user is sitting right above it.
-fn display_path(path: &Path) -> String {
+/// noisy to read when the user is sitting right above it. Shared with
+/// `main`'s post-deletion summary so both surfaces stay consistent.
+pub(crate) fn display_path(path: &Path) -> String {
     match std::env::current_dir() {
         Ok(cwd) => match path.strip_prefix(&cwd) {
             Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
