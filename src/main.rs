@@ -55,11 +55,24 @@ fn main() -> Result<()> {
     }
 
     let mut freed = 0u64;
+    let mut freed_partial = false;
     let mut would_free = 0u64;
+    let mut would_free_partial = false;
     for (wt, outcome) in &results {
+        // A worktree's size can in rare cases still be unknown here (e.g.
+        // confirmed for deletion before its background size computation
+        // finished, and the process exited before that arrived) — track
+        // that rather than silently treating it as 0, so the total below
+        // can honestly say ">= N" instead of undercounting.
         match outcome.action {
-            DeleteAction::Removed => freed += wt.size_bytes.unwrap_or(0),
-            DeleteAction::DryRun => would_free += wt.size_bytes.unwrap_or(0),
+            DeleteAction::Removed => match wt.size_bytes {
+                Some(bytes) => freed += bytes,
+                None => freed_partial = true,
+            },
+            DeleteAction::DryRun => match wt.size_bytes {
+                Some(bytes) => would_free += bytes,
+                None => would_free_partial = true,
+            },
             DeleteAction::Skipped | DeleteAction::Failed => {}
         }
         println!(
@@ -70,11 +83,13 @@ fn main() -> Result<()> {
         );
     }
 
-    if freed > 0 {
-        println!("Freed {}.", size::format_size(freed));
+    if freed > 0 || freed_partial {
+        let prefix = if freed_partial { ">= " } else { "" };
+        println!("Freed {prefix}{}.", size::format_size(freed));
     }
-    if would_free > 0 {
-        println!("Would free {}.", size::format_size(would_free));
+    if would_free > 0 || would_free_partial {
+        let prefix = if would_free_partial { ">= " } else { "" };
+        println!("Would free {prefix}{}.", size::format_size(would_free));
     }
 
     Ok(())

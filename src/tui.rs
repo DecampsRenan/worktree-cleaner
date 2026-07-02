@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
@@ -75,6 +75,16 @@ impl Selector {
     pub fn toggle(&mut self) {
         self.cursor_touched = true;
         let i = self.cursor;
+        // Guard against an empty list (nothing found yet, or a tree with no
+        // worktrees at all) or any other state where the cursor doesn't
+        // currently refer to a real row: `selectable`/`self.selected[i]`
+        // index unconditionally and would panic otherwise. `move_up` /
+        // `move_down` never push the cursor out of bounds and `toggle_all`
+        // only ever indexes within `0..items.len()`, so this is the one
+        // spot that needed the check.
+        if i >= self.items.len() {
+            return;
+        }
         if self.selectable(i) {
             self.selected[i] = !self.selected[i];
         }
@@ -238,7 +248,17 @@ impl AppState {
         match event {
             ScanEvent::Progress(path) => self.current_scan_path = Some(path),
             ScanEvent::Found(wt) => self.selector.insert_found(wt),
-            ScanEvent::Size(path, bytes) => self.selector.update_size(&path, bytes),
+            ScanEvent::Size(path, bytes) => {
+                self.selector.update_size(&path, bytes);
+                // A worktree confirmed for deletion before its size arrived
+                // was snapshotted into `deletion_items` with `size_bytes:
+                // None`; patch that snapshot too so `totals()` stops
+                // undercounting once the size does arrive, even if that's
+                // after the phase has already moved past `Browsing`.
+                if let Some(w) = self.deletion_items.iter_mut().find(|w| w.path == path) {
+                    w.size_bytes = Some(bytes);
+                }
+            }
             ScanEvent::Done => {
                 self.scan_done = true;
                 self.current_scan_path = None;
@@ -336,20 +356,24 @@ fn run_loop(
     let mut delete_rx: Option<mpsc::Receiver<DeleteEvent>> = None;
 
     loop {
-        match state.phase {
-            Phase::Browsing => {
-                while let Ok(event) = scan_rx.try_recv() {
-                    state.apply_scan_event(event);
-                }
+        // Drained every tick regardless of phase (not just while
+        // `Phase::Browsing`): confirming deletion mid-scan must not leave
+        // the rest of the walk buffering unread in an unbounded channel.
+        // `Found` events still get inserted into `selector` even once it's
+        // no longer rendered (past `Phase::Browsing`) — simplest choice,
+        // and harmless since `selector` is entirely separate from the
+        // `deletion_items` snapshot `begin_deletion` already took. `Size`
+        // events additionally patch `deletion_items` directly, so a
+        // worktree whose size was still pending at confirmation time gets
+        // corrected in the live/final totals once it arrives, even after
+        // the phase has moved on.
+        while let Ok(event) = scan_rx.try_recv() {
+            state.apply_scan_event(event);
+        }
+        if let Some(rx) = &delete_rx {
+            while let Ok(event) = rx.try_recv() {
+                state.apply_delete_event(event);
             }
-            Phase::Deleting => {
-                if let Some(rx) = &delete_rx {
-                    while let Ok(event) = rx.try_recv() {
-                        state.apply_delete_event(event);
-                    }
-                }
-            }
-            Phase::Done => {}
         }
 
         terminal.draw(|frame| render(frame, state))?;
@@ -358,6 +382,18 @@ fn run_loop(
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
+            if is_ctrl_c(&key) {
+                // Hard abort, available in every phase but specifically the
+                // only way out of `Phase::Deleting`: normal quit is
+                // deliberately disabled there (see below), but a hung `git
+                // worktree remove` — or a delete thread that died without
+                // ever sending `DeleteEvent::Done` — would otherwise trap
+                // the user with no escape. Restore the terminal ourselves
+                // since `process::exit` skips the caller's `ratatui::
+                // restore()` entirely.
+                ratatui::restore();
+                std::process::exit(130); // 128 + SIGINT, conventional for ctrl-c
+            }
             match (state.phase, key.code) {
                 (Phase::Browsing, KeyCode::Char('q') | KeyCode::Esc) => return Ok(false),
                 (Phase::Browsing, KeyCode::Enter) => match state.begin_deletion() {
@@ -380,7 +416,8 @@ fn run_loop(
                 // Deliberately no quit handling while `Phase::Deleting`:
                 // destructive operations are already in flight, so we let
                 // the run finish rather than risk the user thinking a
-                // quit here undoes anything.
+                // quit here undoes anything. Ctrl-C above is the escape
+                // hatch for this phase.
                 (Phase::Done, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Esc) => {
                     return Ok(true);
                 }
@@ -388,6 +425,13 @@ fn run_loop(
             }
         }
     }
+}
+
+/// Whether `key` is the ctrl-c hard-abort combination. Split out from
+/// `run_loop` so the detection logic is unit-testable without triggering
+/// the `process::exit` it guards.
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn render(frame: &mut Frame, state: &AppState) {
@@ -540,15 +584,18 @@ fn render_deleting(frame: &mut Frame, state: &AppState) {
         .count();
     let total = state.deletion_items.len();
     let footer_text = if state.phase == Phase::Deleting {
-        format!(" {done_count}/{total} processed…")
+        format!(" {done_count}/{total} processed… · ctrl-c abort")
     } else {
-        let (freed, would_free) = totals(&state.deletion_items, &state.deletion_outcomes);
+        let ((freed, freed_partial), (would_free, would_free_partial)) =
+            totals(&state.deletion_items, &state.deletion_outcomes);
         let mut parts = vec![format!("{done_count}/{total} done")];
-        if freed > 0 {
-            parts.push(format!("freed {}", format_size(freed)));
+        if freed > 0 || freed_partial {
+            let prefix = if freed_partial { ">= " } else { "" };
+            parts.push(format!("freed {prefix}{}", format_size(freed)));
         }
-        if would_free > 0 {
-            parts.push(format!("would free {}", format_size(would_free)));
+        if would_free > 0 || would_free_partial {
+            let prefix = if would_free_partial { ">= " } else { "" };
+            parts.push(format!("would free {prefix}{}", format_size(would_free)));
         }
         parts.push("press enter/q to exit".to_string());
         format!(" {}", parts.join(" · "))
@@ -560,19 +607,33 @@ fn render_deleting(frame: &mut Frame, state: &AppState) {
 }
 
 /// Total bytes freed (`Removed`) and that would be freed (`DryRun`) across a
-/// deletion run, used for the final summary line.
-fn totals(items: &[Worktree], outcomes: &[Option<DeleteOutcome>]) -> (u64, u64) {
+/// deletion run, used for the final summary line. Each total is paired with
+/// a `partial` flag: `true` if at least one contributing worktree's size
+/// was still unknown (`size_bytes: None`) when this was computed, so the
+/// caller can show ">= N" instead of silently undercounting. In practice a
+/// late `ScanEvent::Size` patches `AppState::deletion_items` as soon as it
+/// arrives (see `apply_scan_event`), so `partial` is only ever true for the
+/// brief window before that happens.
+fn totals(items: &[Worktree], outcomes: &[Option<DeleteOutcome>]) -> ((u64, bool), (u64, bool)) {
     let mut freed = 0u64;
+    let mut freed_partial = false;
     let mut would_free = 0u64;
+    let mut would_free_partial = false;
     for (w, outcome) in items.iter().zip(outcomes) {
         let Some(outcome) = outcome else { continue };
         match outcome.action {
-            DeleteAction::Removed => freed += w.size_bytes.unwrap_or(0),
-            DeleteAction::DryRun => would_free += w.size_bytes.unwrap_or(0),
+            DeleteAction::Removed => match w.size_bytes {
+                Some(bytes) => freed += bytes,
+                None => freed_partial = true,
+            },
+            DeleteAction::DryRun => match w.size_bytes {
+                Some(bytes) => would_free += bytes,
+                None => would_free_partial = true,
+            },
             _ => {}
         }
     }
-    (freed, would_free)
+    ((freed, freed_partial), (would_free, would_free_partial))
 }
 
 fn deletion_row(w: &Worktree, outcome: &Option<DeleteOutcome>) -> ListItem<'static> {
@@ -823,6 +884,32 @@ mod tests {
     }
 
     #[test]
+    fn toggle_on_an_empty_selector_does_not_panic() {
+        // Regression test for a confirmed crash (B1): pressing space/x with
+        // an empty list — either at startup before the first `Found` event,
+        // or a scanned tree with zero worktrees — indexed `self.items[0]`
+        // unconditionally inside `selectable`, panicking with "index out of
+        // bounds". `toggle` must be a no-op here instead.
+        let mut s = Selector::new(Vec::new());
+        s.toggle();
+        assert!(s.items().is_empty());
+    }
+
+    #[test]
+    fn toggle_when_the_cursor_is_out_of_bounds_does_not_panic() {
+        // Not reachable via the public API today — `move_up`/`move_down`
+        // never push the cursor past `items.len()`, and `insert_found` only
+        // ever grows the list — but `toggle` guards on the cursor's bounds
+        // directly rather than leaning on that invariant holding forever.
+        // Pokes the private field directly since this test is in the same
+        // module.
+        let mut s = Selector::new(vec![fake_worktree("/a", Stale)]);
+        s.cursor = 5;
+        s.toggle();
+        assert!(!s.selected[0], "an out-of-bounds toggle should be a no-op");
+    }
+
+    #[test]
     fn insert_found_keeps_selection_attached_to_the_same_worktree() {
         let mut s = Selector::new(Vec::new());
         s.insert_found(fake_worktree("/orphaned", Orphaned)); // index 0
@@ -914,6 +1001,30 @@ mod tests {
         state.apply_scan_event(ScanEvent::Size(PathBuf::from("/a"), 4096));
 
         assert_eq!(state.selector.items()[0].size_bytes, Some(4096));
+    }
+
+    #[test]
+    fn apply_scan_event_size_also_patches_a_pending_deletion_snapshot() {
+        // Regression test for B3/B4: a worktree can be confirmed for
+        // deletion before its size ever arrives (`begin_deletion` snapshots
+        // whatever `size_bytes` is at that moment, which may be `None`).
+        // Since scan events are now drained in every phase, not just
+        // `Browsing`, a `Size` event that arrives afterwards must still
+        // reach the deletion snapshot — otherwise the totals shown to the
+        // user stay wrong forever instead of just briefly.
+        let mut state = AppState::new(false, false);
+        state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
+        state.selector.toggle();
+        state.begin_deletion();
+        assert_eq!(
+            state.deletion_items[0].size_bytes, None,
+            "precondition: size hadn't arrived yet at confirmation time"
+        );
+
+        // Arrives late, after the phase has already moved to `Deleting`.
+        state.apply_scan_event(ScanEvent::Size(PathBuf::from("/a"), 4096));
+
+        assert_eq!(state.deletion_items[0].size_bytes, Some(4096));
     }
 
     #[test]
@@ -1052,5 +1163,85 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.path.to_str().unwrap(), "/a");
+    }
+
+    #[test]
+    fn is_ctrl_c_detects_the_hard_abort_combination() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(is_ctrl_c(&ctrl_c));
+
+        let plain_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(!is_ctrl_c(&plain_c));
+
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert!(!is_ctrl_c(&ctrl_x));
+    }
+
+    #[test]
+    fn totals_reports_known_bytes_and_flags_partial_when_a_size_is_still_pending() {
+        let items = vec![
+            Worktree {
+                size_bytes: Some(100),
+                ..fake_worktree("/a", Orphaned)
+            },
+            Worktree {
+                size_bytes: None, // still pending
+                ..fake_worktree("/b", Stale)
+            },
+        ];
+        let outcomes = vec![
+            Some(DeleteOutcome {
+                path: PathBuf::from("/a"),
+                action: DeleteAction::Removed,
+                detail: "git worktree remove".to_string(),
+            }),
+            Some(DeleteOutcome {
+                path: PathBuf::from("/b"),
+                action: DeleteAction::Removed,
+                detail: "git worktree remove".to_string(),
+            }),
+        ];
+
+        let ((freed, freed_partial), (would_free, would_free_partial)) = totals(&items, &outcomes);
+
+        assert_eq!(freed, 100, "should sum the known size");
+        assert!(freed_partial, "should flag that /b's size wasn't known");
+        assert_eq!(would_free, 0);
+        assert!(!would_free_partial);
+    }
+
+    #[test]
+    fn totals_is_not_partial_once_every_relevant_size_is_known() {
+        let items = vec![Worktree {
+            size_bytes: Some(100),
+            ..fake_worktree("/a", Orphaned)
+        }];
+        let outcomes = vec![Some(DeleteOutcome {
+            path: PathBuf::from("/a"),
+            action: DeleteAction::Removed,
+            detail: "git worktree remove".to_string(),
+        })];
+
+        let ((freed, freed_partial), _) = totals(&items, &outcomes);
+
+        assert_eq!(freed, 100);
+        assert!(!freed_partial);
+    }
+
+    #[test]
+    fn totals_ignores_worktrees_with_no_outcome_yet() {
+        // Not yet processed (`None` outcome): shouldn't be counted or
+        // flagged as partial — it isn't a `Removed`/`DryRun` outcome (yet).
+        let items = vec![Worktree {
+            size_bytes: None,
+            ..fake_worktree("/a", Stale)
+        }];
+        let outcomes: Vec<Option<DeleteOutcome>> = vec![None];
+
+        let ((freed, freed_partial), (would_free, would_free_partial)) = totals(&items, &outcomes);
+
+        assert_eq!((freed, would_free), (0, 0));
+        assert!(!freed_partial);
+        assert!(!would_free_partial);
     }
 }
