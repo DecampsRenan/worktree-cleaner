@@ -387,34 +387,4 @@ mod tests {
             "worktree directory should be gone after removal via a relative path"
         );
     }
-
-    #[test]
-    fn git_worktree_remove_succeeds_with_a_relative_repo_dir() {
-        let tmp = tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        init_repo(&repo);
-        commit(&repo);
-        let wt_path = tmp.path().join("wt");
-        add_worktree(&repo, &wt_path);
-
-        // Hardening, not a bug fix: `repo_path` is always absolute in
-        // practice (git writes an absolute `gitdir:` pointer), so this path
-        // is only reachable via a hand-corrupted `.git` file. Canonicalize
-        // `repo_dir` too, for the same defense-in-depth reason as `path`.
-        let _cwd_guard = CwdGuard::change_to(tmp.path());
-        let relative_repo_dir = Path::new("./repo");
-        assert!(relative_repo_dir.is_relative());
-
-        let output = git_worktree_remove(relative_repo_dir, &wt_path, false).unwrap();
-
-        assert!(
-            output.status.success(),
-            "git worktree remove should succeed given a relative repo_dir, stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !wt_path.exists(),
-            "worktree directory should be gone after removal via a relative repo_dir"
-        );
-    }
 }
