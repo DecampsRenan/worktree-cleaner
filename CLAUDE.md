@@ -42,4 +42,6 @@ Canonical triage vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `r
 
 ### Domain docs
 
-Single-context repo (`CONTEXT.md` + `docs/adr/` at the root). See `docs/agents/domain.md`.
+Single-context repo: domain docs would live at `CONTEXT.md` + `docs/adr/` at the
+root. Neither exists yet — they get created lazily when terms or decisions
+actually need pinning down. See `docs/agents/domain.md`.

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use crate::delete::DeleteAction;
+use crate::delete::Reclaimed;
 
 /// Traverse a directory tree, find git worktrees, rank them by relevance, and
 /// interactively delete orphaned or stale ones.
@@ -54,27 +54,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut freed = 0u64;
-    let mut freed_partial = false;
-    let mut would_free = 0u64;
-    let mut would_free_partial = false;
-    for (wt, outcome) in &results {
-        // A worktree's size can in rare cases still be unknown here (e.g.
-        // confirmed for deletion before its background size computation
-        // finished, and the process exited before that arrived) — track
-        // that rather than silently treating it as 0, so the total below
-        // can honestly say ">= N" instead of undercounting.
-        match outcome.action {
-            DeleteAction::Removed => match wt.size_bytes {
-                Some(bytes) => freed += bytes,
-                None => freed_partial = true,
-            },
-            DeleteAction::DryRun => match wt.size_bytes {
-                Some(bytes) => would_free += bytes,
-                None => would_free_partial = true,
-            },
-            DeleteAction::Skipped | DeleteAction::Failed => {}
-        }
+    for (_, outcome) in &results {
         println!(
             "{}: {} ({})",
             outcome.action.verb(),
@@ -83,13 +63,16 @@ fn main() -> Result<()> {
         );
     }
 
-    if freed > 0 || freed_partial {
-        let prefix = if freed_partial { ">= " } else { "" };
-        println!("Freed {prefix}{}.", size::format_size(freed));
+    // A worktree's size can in rare cases still be unknown here (e.g.
+    // confirmed for deletion before its background size computation
+    // finished, and the process exited before that arrived); `Reclaimed`
+    // tracks that so the totals say ">= N" rather than undercounting.
+    let reclaimed = Reclaimed::of(results.iter().map(|(wt, outcome)| (wt, outcome)));
+    if let Some(total) = reclaimed.freed.label() {
+        println!("Freed {total}.");
     }
-    if would_free > 0 || would_free_partial {
-        let prefix = if would_free_partial { ">= " } else { "" };
-        println!("Would free {prefix}{}.", size::format_size(would_free));
+    if let Some(total) = reclaimed.would_free.label() {
+        println!("Would free {total}.");
     }
 
     Ok(())

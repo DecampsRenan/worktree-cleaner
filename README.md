@@ -1,5 +1,8 @@
 # worktree-cleaner (`wtc`)
 
+[![CI](https://github.com/DecampsRenan/worktree-cleaner/actions/workflows/ci.yml/badge.svg)](https://github.com/DecampsRenan/worktree-cleaner/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A terminal UI for reclaiming disk and mental space from stray **git worktrees**.
 
 Run it in any directory and it walks the subfolder tree, finds every git
@@ -17,7 +20,7 @@ branch is already gone.
 
 ## Install
 
-### Homebrew
+### Homebrew (recommended)
 
 ```bash
 brew install decampsrenan/tap/worktree-cleaner
@@ -30,10 +33,18 @@ build dependency (nothing to install by hand). For the bleeding edge, add
 ### From source
 
 ```bash
-cargo install --path .        # installs the `wtc` binary
-# or run without installing:
-cargo run -- <args>
+git clone https://github.com/DecampsRenan/worktree-cleaner
+cd worktree-cleaner
+cargo install --path .        # installs the `wtc` binary into ~/.cargo/bin
 ```
+
+Needs Rust 1.88 or newer.
+
+### Requirements
+
+`git` must be on your `PATH` at runtime: `wtc` shells out to
+`git worktree remove` so removals go through git itself rather than being
+faked from the outside.
 
 ## Usage
 
@@ -42,7 +53,12 @@ wtc                 # scan the current directory tree
 wtc ~/code          # scan a specific root
 wtc --dry-run       # show what would be deleted, delete nothing
 wtc --force         # also remove worktrees with uncommitted/untracked changes
+wtc --help          # all flags
+wtc --version
 ```
+
+Not sure yet? Start with `wtc --dry-run`: it walks and ranks exactly like a
+real run and shows you what would go, without touching anything.
 
 In the TUI, worktrees are listed best-deletion-candidate first, each row showing
 its status, age, reclaimable size, branch (tagged `(merged)` when merged), and
@@ -59,6 +75,10 @@ short HEAD:
 The footer shows how many worktrees are selected and their total reclaimable
 size. The main working tree is shown greyed out and can never be selected.
 
+The scan streams: worktrees appear (and re-rank themselves) as they're found,
+so you can start picking before it finishes. Sizes are computed in the
+background and show as `…` until they land. `ctrl-c` aborts at any point.
+
 ### How deletion works
 
 - **Healthy linked worktree** → `git worktree remove`. If it's dirty
@@ -70,6 +90,14 @@ size. The main working tree is shown greyed out and can never be selected.
 
 A failure on one worktree never aborts the others; each gets a line in the
 summary, which also reports the total space freed.
+
+## What it never touches
+
+- The main working tree of any repository — it's greyed out and unselectable.
+- Anything you didn't tick. Nothing is ever deleted implicitly.
+- Anything under `node_modules`, `target`, `.cargo`, or `.cache` — those are
+  skipped during the walk, so a vendored repo buried in a dependency directory
+  is never offered up for deletion.
 
 ## Relevance ranking
 
@@ -87,11 +115,15 @@ into a different tier.
 ## Development
 
 ```bash
-cargo run -- --dry-run    # run against the current directory
-cargo build --release     # produce target/release/wtc
-cargo clippy --all-targets
+cargo run -- --dry-run              # run against the current directory
+cargo build --release               # produce target/release/wtc
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+The test suite creates real repositories and worktrees in temp directories via
+the `git` CLI, so `git` is needed to run it too.
 
 Built with [ratatui](https://ratatui.rs/) + [crossterm](https://github.com/crossterm-rs/crossterm),
 [ignore](https://docs.rs/ignore) for traversal, and [git2](https://docs.rs/git2)
@@ -99,4 +131,4 @@ for worktree introspection.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
