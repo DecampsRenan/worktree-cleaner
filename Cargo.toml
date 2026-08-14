@@ -2,9 +2,13 @@
 name = "worktree-cleaner"
 version = "0.2.0"
 edition = "2024"
-# Verified with `cargo check --all-targets` on 1.85.0; this is the edition-2024
-# floor. Keep in sync with the `msrv` job in .github/workflows/ci.yml.
-rust-version = "1.85"
+# Our own code only needs the edition-2024 floor (1.85), but ratatui — and
+# through it instability, time and darling — declares 1.88.0, so that's what a
+# fresh `cargo install` actually requires. Keep in sync with the `msrv` job in
+# .github/workflows/ci.yml, which is the thing that verifies it: a warm local
+# registry lets an older cargo build the tree anyway and quietly under-report
+# this.
+rust-version = "1.88"
 description = "Traverse a directory tree, find git worktrees, rank them by relevance, and interactively delete orphaned or stale ones."
 license = "MIT"
 repository = "https://github.com/DecampsRenan/worktree-cleaner"

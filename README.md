@@ -38,7 +38,7 @@ cd worktree-cleaner
 cargo install --path .        # installs the `wtc` binary into ~/.cargo/bin
 ```
 
-Needs Rust 1.85 or newer (edition 2024).
+Needs Rust 1.88 or newer.
 
 ### Requirements
 

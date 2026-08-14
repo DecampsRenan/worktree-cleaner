@@ -44,7 +44,7 @@ jobs:
 
       # Keep in sync with `rust-version` in Cargo.toml.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.88.0
 
       - uses: Swatinem/rust-cache@v2
 
