@@ -30,12 +30,18 @@ jobs:
     steps:
       - name: Resolve tag and source tarball sha256
         id: src
+        # The tag and repo name go through `env:` rather than being
+        # interpolated straight into the script: `${{ ... }}` is substituted
+        # as raw text before the shell ever sees it, so a crafted value would
+        # otherwise be executed as shell code.
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          tag="${{ github.event.inputs.tag || github.ref_name }}"
-          url="https://github.com/${{ github.repository }}/archive/refs/tags/${tag}.tar.gz"
+          url="https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
           sha=$(curl -fsSL "$url" | shasum -a 256 | cut -d' ' -f1)
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha" >> "$GITHUB_OUTPUT"
 
