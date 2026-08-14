@@ -11,7 +11,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::delete::{self, DeleteAction, DeleteEvent, DeleteOutcome};
+use crate::delete::{self, DeleteAction, DeleteEvent, DeleteOutcome, Reclaimed};
 use crate::scan::{self, ScanEvent};
 use crate::score::relevance;
 use crate::size::format_size;
@@ -586,16 +586,13 @@ fn render_deleting(frame: &mut Frame, state: &AppState) {
     let footer_text = if state.phase == Phase::Deleting {
         format!(" {done_count}/{total} processed… · ctrl-c abort")
     } else {
-        let ((freed, freed_partial), (would_free, would_free_partial)) =
-            totals(&state.deletion_items, &state.deletion_outcomes);
+        let reclaimed = totals(&state.deletion_items, &state.deletion_outcomes);
         let mut parts = vec![format!("{done_count}/{total} done")];
-        if freed > 0 || freed_partial {
-            let prefix = if freed_partial { ">= " } else { "" };
-            parts.push(format!("freed {prefix}{}", format_size(freed)));
+        if let Some(freed) = reclaimed.freed.label() {
+            parts.push(format!("freed {freed}"));
         }
-        if would_free > 0 || would_free_partial {
-            let prefix = if would_free_partial { ">= " } else { "" };
-            parts.push(format!("would free {prefix}{}", format_size(would_free)));
+        if let Some(would_free) = reclaimed.would_free.label() {
+            parts.push(format!("would free {would_free}"));
         }
         parts.push("press enter/q to exit".to_string());
         format!(" {}", parts.join(" · "))
@@ -606,34 +603,21 @@ fn render_deleting(frame: &mut Frame, state: &AppState) {
     );
 }
 
-/// Total bytes freed (`Removed`) and that would be freed (`DryRun`) across a
-/// deletion run, used for the final summary line. Each total is paired with
-/// a `partial` flag: `true` if at least one contributing worktree's size
-/// was still unknown (`size_bytes: None`) when this was computed, so the
-/// caller can show ">= N" instead of silently undercounting. In practice a
-/// late `ScanEvent::Size` patches `AppState::deletion_items` as soon as it
-/// arrives (see `apply_scan_event`), so `partial` is only ever true for the
-/// brief window before that happens.
-fn totals(items: &[Worktree], outcomes: &[Option<DeleteOutcome>]) -> ((u64, bool), (u64, bool)) {
-    let mut freed = 0u64;
-    let mut freed_partial = false;
-    let mut would_free = 0u64;
-    let mut would_free_partial = false;
-    for (w, outcome) in items.iter().zip(outcomes) {
-        let Some(outcome) = outcome else { continue };
-        match outcome.action {
-            DeleteAction::Removed => match w.size_bytes {
-                Some(bytes) => freed += bytes,
-                None => freed_partial = true,
-            },
-            DeleteAction::DryRun => match w.size_bytes {
-                Some(bytes) => would_free += bytes,
-                None => would_free_partial = true,
-            },
-            _ => {}
-        }
-    }
-    ((freed, freed_partial), (would_free, would_free_partial))
+/// Total up a deletion run in progress, skipping the worktrees whose outcome
+/// hasn't arrived yet. Thin adapter over [`Reclaimed::of`], which is shared
+/// with `main`'s post-exit summary so the two never disagree.
+///
+/// A worktree can be counted while its size is still unknown, which
+/// [`Reclaimed`] reports as a lower bound. In practice a late
+/// `ScanEvent::Size` patches `AppState::deletion_items` as soon as it arrives
+/// (see `apply_scan_event`), so that only shows for a brief window.
+fn totals(items: &[Worktree], outcomes: &[Option<DeleteOutcome>]) -> Reclaimed {
+    Reclaimed::of(
+        items
+            .iter()
+            .zip(outcomes)
+            .filter_map(|(w, outcome)| Some((w, outcome.as_ref()?))),
+    )
 }
 
 fn deletion_row(w: &Worktree, outcome: &Option<DeleteOutcome>) -> ListItem<'static> {
@@ -1202,12 +1186,14 @@ mod tests {
             }),
         ];
 
-        let ((freed, freed_partial), (would_free, would_free_partial)) = totals(&items, &outcomes);
+        let reclaimed = totals(&items, &outcomes);
 
-        assert_eq!(freed, 100, "should sum the known size");
-        assert!(freed_partial, "should flag that /b's size wasn't known");
-        assert_eq!(would_free, 0);
-        assert!(!would_free_partial);
+        assert_eq!(
+            reclaimed.freed.label().as_deref(),
+            Some(">= 100 B"),
+            "should sum the known size and flag that /b's wasn't known"
+        );
+        assert_eq!(reclaimed.would_free.label(), None);
     }
 
     #[test]
@@ -1222,10 +1208,9 @@ mod tests {
             detail: "git worktree remove".to_string(),
         })];
 
-        let ((freed, freed_partial), _) = totals(&items, &outcomes);
+        let reclaimed = totals(&items, &outcomes);
 
-        assert_eq!(freed, 100);
-        assert!(!freed_partial);
+        assert_eq!(reclaimed.freed.label().as_deref(), Some("100 B"));
     }
 
     #[test]
@@ -1238,10 +1223,8 @@ mod tests {
         }];
         let outcomes: Vec<Option<DeleteOutcome>> = vec![None];
 
-        let ((freed, freed_partial), (would_free, would_free_partial)) = totals(&items, &outcomes);
+        let reclaimed = totals(&items, &outcomes);
 
-        assert_eq!((freed, would_free), (0, 0));
-        assert!(!freed_partial);
-        assert!(!would_free_partial);
+        assert_eq!(reclaimed, Reclaimed::default());
     }
 }

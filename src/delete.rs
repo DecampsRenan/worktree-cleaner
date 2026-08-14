@@ -3,6 +3,7 @@ use std::process::{Command, Output};
 use std::sync::mpsc;
 
 use crate::scan::canonicalize_path;
+use crate::size::Amount;
 use crate::worktree::{Worktree, WorktreeStatus};
 
 /// What happened (or would happen) to a worktree during deletion.
@@ -38,6 +39,36 @@ pub struct DeleteOutcome {
     pub path: PathBuf,
     pub action: DeleteAction,
     pub detail: String,
+}
+
+/// Disk space accounted for by a deletion run.
+///
+/// Shared by the TUI's live footer and the summary `main` prints after the
+/// terminal is restored, so the two surfaces can never drift apart on what
+/// they claim was reclaimed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Reclaimed {
+    /// Space actually freed, from worktrees that were removed.
+    pub freed: Amount,
+    /// Space a real run would free, from worktrees a dry run only reported on.
+    pub would_free: Amount,
+}
+
+impl Reclaimed {
+    /// Total up a deletion run from each worktree paired with its outcome.
+    /// Worktrees that were skipped or failed contribute nothing — no space
+    /// was (or would be) reclaimed from them.
+    pub fn of<'a>(run: impl IntoIterator<Item = (&'a Worktree, &'a DeleteOutcome)>) -> Self {
+        let mut totals = Self::default();
+        for (wt, outcome) in run {
+            match outcome.action {
+                DeleteAction::Removed => totals.freed.add(wt.size_bytes),
+                DeleteAction::DryRun => totals.would_free.add(wt.size_bytes),
+                DeleteAction::Skipped | DeleteAction::Failed => {}
+            }
+        }
+        totals
+    }
 }
 
 /// Delete the given worktrees, returning a per-worktree outcome report.
@@ -175,6 +206,7 @@ fn git_worktree_remove(repo_dir: &Path, path: &Path, force: bool) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
+    use super::DeleteAction::{DryRun, Failed, Removed, Skipped};
     use super::*;
     use crate::scan::scan;
     use crate::testutil::{CwdGuard, add_worktree, commit, git, init_repo};
@@ -448,6 +480,65 @@ mod tests {
             !wt_path.exists(),
             "worktree directory should be gone after removal via a relative path"
         );
+    }
+
+    #[test]
+    fn reclaimed_splits_freed_from_would_free_and_ignores_skips_and_failures() {
+        use crate::testutil::fake_worktree;
+
+        let sized = |path: &str, bytes: Option<u64>| Worktree {
+            size_bytes: bytes,
+            ..fake_worktree(path, WorktreeStatus::Stale)
+        };
+        let outcome = |path: &str, action| DeleteOutcome {
+            path: PathBuf::from(path),
+            action,
+            detail: String::new(),
+        };
+        let run = [
+            (sized("/removed", Some(1000)), outcome("/removed", Removed)),
+            (sized("/dry", Some(200)), outcome("/dry", DryRun)),
+            // Neither of these reclaims anything, whatever their size.
+            (sized("/skipped", Some(9999)), outcome("/skipped", Skipped)),
+            (sized("/failed", Some(9999)), outcome("/failed", Failed)),
+        ];
+
+        let reclaimed = Reclaimed::of(run.iter().map(|(w, o)| (w, o)));
+
+        assert_eq!(reclaimed.freed.label().as_deref(), Some("1000 B"));
+        assert_eq!(reclaimed.would_free.label().as_deref(), Some("200 B"));
+    }
+
+    #[test]
+    fn reclaimed_reports_a_lower_bound_when_a_size_is_still_pending() {
+        use crate::testutil::fake_worktree;
+
+        let run = [
+            (
+                Worktree {
+                    size_bytes: Some(1024),
+                    ..fake_worktree("/a", WorktreeStatus::Stale)
+                },
+                DeleteOutcome {
+                    path: PathBuf::from("/a"),
+                    action: Removed,
+                    detail: String::new(),
+                },
+            ),
+            (
+                // Removed before its background size computation finished.
+                fake_worktree("/b", WorktreeStatus::Stale),
+                DeleteOutcome {
+                    path: PathBuf::from("/b"),
+                    action: Removed,
+                    detail: String::new(),
+                },
+            ),
+        ];
+
+        let reclaimed = Reclaimed::of(run.iter().map(|(w, o)| (w, o)));
+
+        assert_eq!(reclaimed.freed.label().as_deref(), Some(">= 1.0 KB"));
     }
 
     #[test]
