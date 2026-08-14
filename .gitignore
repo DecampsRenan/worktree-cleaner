@@ -1,5 +1,8 @@
 /target
 
+# Agent tooling: per-machine settings, not shared.
+/.claude/settings.local.json
+
 # Not a Node project — guard against stray npm files (e.g. from `npx`).
 /package.json
 /package-lock.json
