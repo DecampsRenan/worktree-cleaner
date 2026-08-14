@@ -2,6 +2,9 @@
 name = "worktree-cleaner"
 version = "0.2.0"
 edition = "2024"
+# Verified with `cargo check --all-targets` on 1.85.0; this is the edition-2024
+# floor. Keep in sync with the `msrv` job in .github/workflows/ci.yml.
+rust-version = "1.85"
 description = "Traverse a directory tree, find git worktrees, rank them by relevance, and interactively delete orphaned or stale ones."
 license = "MIT"
 repository = "https://github.com/DecampsRenan/worktree-cleaner"
