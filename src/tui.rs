@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -8,7 +9,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::delete::{self, DeleteAction, DeleteEvent, DeleteOutcome, Reclaimed};
@@ -29,6 +30,122 @@ pub struct Selector {
     /// meaningful to stay attached to yet. See `insert_found`.
     cursor_touched: bool,
     selected: Vec<bool>,
+    sort: SortOrder,
+}
+
+/// The column used to order the browsing table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortField {
+    Relevance,
+    Age,
+    Size,
+    Branch,
+    Path,
+}
+
+impl SortField {
+    fn next(self) -> Self {
+        match self {
+            Self::Relevance => Self::Age,
+            Self::Age => Self::Size,
+            Self::Size => Self::Branch,
+            Self::Branch => Self::Path,
+            Self::Path => Self::Relevance,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "relevance",
+            Self::Age => "age",
+            Self::Size => "size",
+            Self::Branch => "branch",
+            Self::Path => "path",
+        }
+    }
+
+    fn default_direction(self) -> SortDirection {
+        match self {
+            Self::Relevance | Self::Size => SortDirection::Descending,
+            Self::Age | Self::Branch | Self::Path => SortDirection::Ascending,
+        }
+    }
+}
+
+/// Direction applied to the active sort column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+impl SortDirection {
+    fn reverse(self) -> Self {
+        match self {
+            Self::Ascending => Self::Descending,
+            Self::Descending => Self::Ascending,
+        }
+    }
+
+    fn symbol(self) -> &'static str {
+        match self {
+            Self::Ascending => "↑",
+            Self::Descending => "↓",
+        }
+    }
+}
+
+/// The active ordering for the browsing table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SortOrder {
+    field: SortField,
+    direction: SortDirection,
+}
+
+impl Default for SortOrder {
+    fn default() -> Self {
+        Self {
+            field: SortField::Relevance,
+            direction: SortField::Relevance.default_direction(),
+        }
+    }
+}
+
+impl SortOrder {
+    fn compare(self, a: &Worktree, b: &Worktree) -> Ordering {
+        let order = match self.field {
+            SortField::Relevance => relevance(a).total_cmp(&relevance(b)),
+            // Oldest known activity first; unknown dates go last.
+            SortField::Age => match (
+                a.last_commit.or(a.last_modified),
+                b.last_commit.or(b.last_modified),
+            ) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            // Known worktrees sort by size; pending sizes remain last under
+            // the default descending direction.
+            SortField::Size => a.size_bytes.cmp(&b.size_bytes),
+            // Named branches first, alphabetically; unknown branches go last.
+            SortField::Branch => match (a.branch.as_deref(), b.branch.as_deref()) {
+                (Some(a), Some(b)) => a.cmp(b),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            SortField::Path => a.path.cmp(&b.path),
+        };
+        match self.direction {
+            SortDirection::Ascending => order,
+            SortDirection::Descending => order.reverse(),
+        }
+    }
+
+    fn label(self) -> String {
+        format!("{} {}", self.field.label(), self.direction.symbol())
+    }
 }
 
 impl Selector {
@@ -39,6 +156,7 @@ impl Selector {
             cursor: 0,
             cursor_touched: false,
             selected,
+            sort: SortOrder::default(),
         }
     }
 
@@ -101,6 +219,21 @@ impl Selector {
         }
     }
 
+    fn cycle_sort(&mut self) {
+        self.sort.field = self.sort.field.next();
+        self.sort.direction = self.sort.field.default_direction();
+        self.sort_items();
+    }
+
+    fn reverse_sort(&mut self) {
+        self.sort.direction = self.sort.direction.reverse();
+        self.sort_items();
+    }
+
+    fn sort_label(&self) -> String {
+        self.sort.label()
+    }
+
     /// Total on-disk size of the currently-selected worktrees, in bytes.
     /// Worktrees whose size hasn't been computed yet contribute `0` — the
     /// total simply grows as their `Size` events arrive.
@@ -139,47 +272,13 @@ impl Selector {
             .collect()
     }
 
-    /// Insert a newly discovered worktree, keeping `items` ordered by
-    /// descending [`relevance`] score — the same ranking a finished batch
-    /// used to get sorted into in one pass, now maintained incrementally as
-    /// worktrees stream in. Ties keep the earlier-found item on top.
-    ///
-    /// The cursor and every existing selection flag stay attached to their
-    /// worktree: both shift in lockstep with the insertion, so a row
-    /// appearing above the cursor (or an already-selected row) never
-    /// changes which worktree it refers to. This is the mechanism that
-    /// keeps a relevance-ranked list without ever yanking the cursor or a
-    /// selection onto the wrong item while the scan is still running.
+    /// Insert a newly discovered worktree and order the table according to
+    /// the active sort. The cursor and selections stay attached to their
+    /// worktrees while rows move around them.
     pub fn insert_found(&mut self, wt: Worktree) {
-        let had_items = !self.items.is_empty();
-        let score = relevance(&wt);
-        let idx = self
-            .items
-            .partition_point(|existing| relevance(existing) >= score);
-        self.items.insert(idx, wt);
-        self.selected.insert(idx, false);
-
-        if self.cursor_touched {
-            // The user has looked at (or acted on) a specific row: keep the
-            // cursor attached to that same worktree as the list reshuffles
-            // around it, by shifting it exactly like `Vec::insert` shifts
-            // every item from `idx` onward. `had_items` guards the very
-            // first-ever insertion into an empty list, where the cursor
-            // doesn't yet refer to anything — without it, `idx(0) <=
-            // cursor(0)` would look like "shift needed" and push the
-            // cursor out of bounds.
-            if had_items && idx <= self.cursor {
-                self.cursor += 1;
-            }
-        } else {
-            // Before that, there's no specific row to stay attached to —
-            // pin the cursor to the top of the list so it always
-            // highlights the current best candidate, rather than letting
-            // it silently drift to whatever item happened to start at
-            // index 0 before higher-relevance discoveries got inserted
-            // above it.
-            self.cursor = 0;
-        }
+        self.items.push(wt);
+        self.selected.push(false);
+        self.sort_items();
     }
 
     /// Record the computed size for the worktree at `path`, if it's still
@@ -188,7 +287,29 @@ impl Selector {
     pub fn update_size(&mut self, path: &Path, bytes: u64) {
         if let Some(w) = self.items.iter_mut().find(|w| w.path == path) {
             w.size_bytes = Some(bytes);
+            self.sort_items();
         }
+    }
+
+    /// Sort rows while keeping every selection — and, once the user has
+    /// moved it, the cursor — attached to its original worktree.
+    fn sort_items(&mut self) {
+        let cursor_path = self
+            .cursor_touched
+            .then(|| self.items.get(self.cursor).map(|w| w.path.clone()))
+            .flatten();
+        let mut rows: Vec<_> = std::mem::take(&mut self.items)
+            .into_iter()
+            .zip(std::mem::take(&mut self.selected))
+            .collect();
+        rows.sort_by(|(a, _), (b, _)| self.sort.compare(a, b));
+        let (items, selected): (Vec<_>, Vec<_>) = rows.into_iter().unzip();
+        self.items = items;
+        self.selected = selected;
+
+        self.cursor = cursor_path
+            .and_then(|path| self.items.iter().position(|w| w.path == path))
+            .unwrap_or(0);
     }
 }
 
@@ -199,6 +320,9 @@ enum Phase {
     /// confirm, or quit at any time — they don't have to wait for the full
     /// scan to finish.
     Browsing,
+    /// Selected worktrees contain local changes; wait for an explicit
+    /// confirmation before allowing their removal.
+    ConfirmingDirty,
     /// The user confirmed a selection; a background thread is deleting the
     /// chosen worktrees one at a time.
     Deleting,
@@ -208,7 +332,7 @@ enum Phase {
 
 /// The TUI's full state: the live worktree list plus scan/deletion
 /// progress. Event handling (`apply_scan_event`, `apply_delete_event`,
-/// `begin_deletion`) is pure state mutation with no rendering or terminal
+/// `prepare_deletion`) is pure state mutation with no rendering or terminal
 /// I/O, so it's unit-testable on its own — see the tests below.
 struct AppState {
     selector: Selector,
@@ -219,7 +343,9 @@ struct AppState {
     current_scan_path: Option<PathBuf>,
     phase: Phase,
     dry_run: bool,
-    force: bool,
+    /// The selected worktrees held while the user confirms removal of local
+    /// changes. Empty outside [`Phase::ConfirmingDirty`].
+    pending_deletion_items: Vec<Worktree>,
     /// The worktree currently being removed, for the live "Deleting …" line.
     deleting_path: Option<PathBuf>,
     /// Snapshot of the worktrees selected for deletion, taken once at
@@ -230,14 +356,14 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(dry_run: bool, force: bool) -> Self {
+    fn new(dry_run: bool) -> Self {
         Self {
             selector: Selector::new(Vec::new()),
             scan_done: false,
             current_scan_path: None,
             phase: Phase::Browsing,
             dry_run,
-            force,
+            pending_deletion_items: Vec::new(),
             deleting_path: None,
             deletion_items: Vec::new(),
             deletion_outcomes: Vec::new(),
@@ -258,6 +384,13 @@ impl AppState {
                 if let Some(w) = self.deletion_items.iter_mut().find(|w| w.path == path) {
                     w.size_bytes = Some(bytes);
                 }
+                if let Some(w) = self
+                    .pending_deletion_items
+                    .iter_mut()
+                    .find(|w| w.path == path)
+                {
+                    w.size_bytes = Some(bytes);
+                }
             }
             ScanEvent::Done => {
                 self.scan_done = true;
@@ -266,13 +399,31 @@ impl AppState {
         }
     }
 
-    /// Snapshot the current selection and transition into the deletion
-    /// phase. Returns `None` (leaving the phase unchanged) if nothing is
-    /// selected, so the caller can treat that the same as cancelling —
-    /// matching the pre-streaming behavior where confirming with an empty
-    /// selection produced no outcomes.
-    fn begin_deletion(&mut self) -> Option<Vec<Worktree>> {
+    /// Snapshot the current selection. Returns `None` when nothing is
+    /// selected; otherwise returns whether an explicit dirty-worktree
+    /// confirmation is required before deletion may begin.
+    fn prepare_deletion(&mut self) -> Option<bool> {
         let chosen = self.selector.selected_worktrees_snapshot();
+        if chosen.is_empty() {
+            return None;
+        }
+        let needs_confirmation = !self.dry_run && chosen.iter().any(|w| w.dirty);
+        self.pending_deletion_items = chosen;
+        if needs_confirmation {
+            self.phase = Phase::ConfirmingDirty;
+        }
+        Some(needs_confirmation)
+    }
+
+    /// Start deleting the snapshot prepared by [`prepare_deletion`].
+    fn begin_deletion(&mut self) -> Option<Vec<Worktree>> {
+        // Keeping this fallback makes the state transition independently
+        // testable; the interactive loop always calls `prepare_deletion`
+        // first so it can show the dirty-worktree warning when needed.
+        if self.pending_deletion_items.is_empty() {
+            self.pending_deletion_items = self.selector.selected_worktrees_snapshot();
+        }
+        let chosen = std::mem::take(&mut self.pending_deletion_items);
         if chosen.is_empty() {
             return None;
         }
@@ -280,6 +431,13 @@ impl AppState {
         self.deletion_items = chosen.clone();
         self.phase = Phase::Deleting;
         Some(chosen)
+    }
+
+    /// Dismiss the dirty-worktree warning without deleting anything. The
+    /// original ticks stay selected so the user can revise their choice.
+    fn cancel_dirty_confirmation(&mut self) {
+        self.pending_deletion_items.clear();
+        self.phase = Phase::Browsing;
     }
 
     fn apply_delete_event(&mut self, event: DeleteEvent) {
@@ -303,7 +461,7 @@ impl AppState {
 
     /// Consume the app state, pairing each worktree selected for deletion
     /// with its outcome. A worktree with no recorded outcome (deletion
-    /// events stop arriving if the user force-quits mid-run) is dropped
+    /// events stop arriving if the user abruptly exits mid-run) is dropped
     /// rather than fabricating one.
     fn into_results(self) -> Vec<(Worktree, DeleteOutcome)> {
         self.deletion_items
@@ -322,11 +480,11 @@ impl AppState {
 /// Returns the worktrees that were attempted paired with their outcomes.
 /// An empty result means the user cancelled, or confirmed with nothing
 /// selected (treated the same way).
-pub fn run(root: PathBuf, dry_run: bool, force: bool) -> Result<Vec<(Worktree, DeleteOutcome)>> {
+pub fn run(root: PathBuf, dry_run: bool) -> Result<Vec<(Worktree, DeleteOutcome)>> {
     let (scan_tx, scan_rx) = mpsc::channel();
     thread::spawn(move || scan::scan_streaming(root, scan_tx));
 
-    let mut state = AppState::new(dry_run, force);
+    let mut state = AppState::new(dry_run);
     let mut terminal = ratatui::init();
     let should_return_results = run_loop(&mut terminal, &mut state, scan_rx);
     ratatui::restore();
@@ -363,7 +521,7 @@ fn run_loop(
         // no longer rendered (past `Phase::Browsing`) — simplest choice,
         // and harmless since `selector` is entirely separate from the
         // `deletion_items` snapshot `begin_deletion` already took. `Size`
-        // events additionally patch `deletion_items` directly, so a
+        // events additionally patch both pending and active snapshots, so a
         // worktree whose size was still pending at confirmation time gets
         // corrected in the live/final totals once it arrives, even after
         // the phase has moved on.
@@ -396,14 +554,19 @@ fn run_loop(
             }
             match (state.phase, key.code) {
                 (Phase::Browsing, KeyCode::Char('q') | KeyCode::Esc) => return Ok(false),
-                (Phase::Browsing, KeyCode::Enter) => match state.begin_deletion() {
-                    Some(chosen) => {
+                (Phase::Browsing, KeyCode::Enter) => match state.prepare_deletion() {
+                    Some(false) => {
+                        let chosen = state
+                            .begin_deletion()
+                            .expect("a prepared deletion has selected worktrees");
                         let (tx, rx) = mpsc::channel();
                         let dry_run = state.dry_run;
-                        let force = state.force;
-                        thread::spawn(move || delete::delete_streaming(chosen, dry_run, force, tx));
+                        thread::spawn(move || delete::delete_streaming(chosen, dry_run, false, tx));
                         delete_rx = Some(rx);
                     }
+                    // Local changes are listed in a separate confirmation
+                    // screen before a forced removal can start.
+                    Some(true) => {}
                     // Nothing selected: confirming is equivalent to cancelling.
                     None => return Ok(false),
                 },
@@ -413,6 +576,20 @@ fn run_loop(
                     state.selector.toggle()
                 }
                 (Phase::Browsing, KeyCode::Char('a')) => state.selector.toggle_all(),
+                (Phase::Browsing, KeyCode::Char('s')) => state.selector.cycle_sort(),
+                (Phase::Browsing, KeyCode::Char('S')) => state.selector.reverse_sort(),
+                (Phase::ConfirmingDirty, KeyCode::Enter) => {
+                    let chosen = state
+                        .begin_deletion()
+                        .expect("a confirmed deletion has selected worktrees");
+                    let (tx, rx) = mpsc::channel();
+                    let dry_run = state.dry_run;
+                    thread::spawn(move || delete::delete_streaming(chosen, dry_run, true, tx));
+                    delete_rx = Some(rx);
+                }
+                (Phase::ConfirmingDirty, KeyCode::Char('q') | KeyCode::Esc) => {
+                    state.cancel_dirty_confirmation()
+                }
                 // Deliberately no quit handling while `Phase::Deleting`:
                 // destructive operations are already in flight, so we let
                 // the run finish rather than risk the user thinking a
@@ -437,6 +614,7 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
 fn render(frame: &mut Frame, state: &AppState) {
     match state.phase {
         Phase::Browsing => render_browsing(frame, state),
+        Phase::ConfirmingDirty => render_dirty_confirmation(frame, state),
         Phase::Deleting | Phase::Done => render_deleting(frame, state),
     }
 }
@@ -460,13 +638,16 @@ fn render_browsing(frame: &mut Frame, state: &AppState) {
     );
 
     let selector = &state.selector;
-    let rows: Vec<ListItem> = if selector.items().is_empty() {
+    let rows: Vec<Row> = if selector.items().is_empty() {
         let msg = if state.scan_done {
             "No git worktrees found."
         } else {
             "Scanning for worktrees…"
         };
-        vec![ListItem::new(msg).style(Style::default().add_modifier(Modifier::DIM))]
+        vec![
+            Row::new(vec!["", "", "", "", "", msg])
+                .style(Style::default().add_modifier(Modifier::DIM)),
+        ]
     } else {
         selector
             .items()
@@ -480,20 +661,40 @@ fn render_browsing(frame: &mut Frame, state: &AppState) {
         .filter(|&i| selector.is_selected(i))
         .count();
 
-    let list = List::new(rows)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" worktree-cleaner — pick worktrees to delete "),
-        )
-        .highlight_symbol("▶ ")
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let header = Row::new(vec![
+        String::new(),
+        sort_header("STATUS", SortField::Relevance, selector),
+        sort_header("AGE", SortField::Age, selector),
+        sort_header("SIZE", SortField::Size, selector),
+        sort_header("BRANCH", SortField::Branch, selector),
+        sort_header("PATH", SortField::Path, selector),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(3),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(24),
+            Constraint::Min(20),
+        ],
+    )
+    .header(header)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" worktree-cleaner — pick worktrees to delete "),
+    )
+    .highlight_symbol("▶ ")
+    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
-    let mut list_state = ListState::default();
+    let mut table_state = TableState::default();
     if !selector.items().is_empty() {
-        list_state.select(Some(selector.cursor()));
+        table_state.select(Some(selector.cursor()));
     }
-    frame.render_stateful_widget(list, list_area, &mut list_state);
+    frame.render_stateful_widget(table, list_area, &mut table_state);
 
     let scanning_hint = if state.scan_done {
         ""
@@ -501,14 +702,23 @@ fn render_browsing(frame: &mut Frame, state: &AppState) {
         " · scanning…"
     };
     let footer = Line::from(format!(
-        " {selected} selected ({}) · space/x toggle · a all · ↑/↓ move · enter delete · q cancel{scanning_hint}",
+        " {selected} selected ({}) · sort: {} · space/x toggle · a all · s next sort · S reverse · ↑/↓ move · enter delete · q cancel{scanning_hint}",
         format_size(selector.selected_size()),
+        selector.sort_label(),
     ))
     .style(Style::default().add_modifier(Modifier::DIM));
     frame.render_widget(footer, footer_area);
 }
 
-fn worktree_row(w: &Worktree, selectable: bool, selected: bool) -> ListItem<'static> {
+fn sort_header(label: &str, field: SortField, selector: &Selector) -> String {
+    if selector.sort.field == field {
+        format!("{label} {}", selector.sort.direction.symbol())
+    } else {
+        label.to_string()
+    }
+}
+
+fn worktree_row(w: &Worktree, selectable: bool, selected: bool) -> Row<'static> {
     let mark = if !selectable {
         "   "
     } else if selected {
@@ -528,16 +738,52 @@ fn worktree_row(w: &Worktree, selectable: bool, selected: bool) -> ListItem<'sta
         Some(bytes) => format_size(bytes),
         None => "…".to_string(),
     };
-    let text = format!(
-        "{mark} {:<8} {:>12} {:>9}  {:<22} {:<8} {}",
-        w.status.label(),
-        w.age_label(),
-        size,
-        branch,
-        w.head.as_deref().unwrap_or("-"),
-        display_path(&w.path),
+    Row::new(vec![
+        Cell::from(mark),
+        Cell::from(w.status.label()),
+        Cell::from(w.age_label()),
+        Cell::from(size),
+        Cell::from(branch),
+        Cell::from(display_path(&w.path)),
+    ])
+    .style(Style::default().fg(status_color(w.status)))
+}
+
+/// Warning screen shown only when a real deletion includes local changes.
+/// It deliberately lists the affected paths instead of hiding the risk in a
+/// generic prompt, so the user can recognise what would be discarded.
+fn render_dirty_confirmation(frame: &mut Frame, state: &AppState) {
+    let [warning_area, list_area, footer_area] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+
+    frame.render_widget(
+        Line::from("Local changes detected — deleting these worktrees will discard them.")
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        warning_area,
     );
-    ListItem::new(text).style(Style::default().fg(status_color(w.status)))
+
+    let dirty_rows: Vec<ListItem> = state
+        .pending_deletion_items
+        .iter()
+        .filter(|w| w.dirty)
+        .map(|w| ListItem::new(display_path(&w.path)))
+        .collect();
+    let list = List::new(dirty_rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" selected worktrees with uncommitted or untracked files "),
+    );
+    frame.render_widget(list, list_area);
+
+    frame.render_widget(
+        Line::from(" Enter delete anyway · q/esc go back ")
+            .style(Style::default().add_modifier(Modifier::DIM)),
+        footer_area,
+    );
 }
 
 fn render_deleting(frame: &mut Frame, state: &AppState) {
@@ -920,6 +1166,39 @@ mod tests {
     }
 
     #[test]
+    fn sorting_reorders_rows_without_losing_the_cursor_or_selection() {
+        let mut s = Selector::new(vec![
+            Worktree {
+                size_bytes: Some(20),
+                branch: Some("zebra".to_string()),
+                ..fake_worktree("/zebra", Stale)
+            },
+            Worktree {
+                size_bytes: Some(100),
+                branch: Some("alpha".to_string()),
+                ..fake_worktree("/alpha", Stale)
+            },
+        ]);
+        s.move_down();
+        s.toggle(); // select /alpha
+
+        s.cycle_sort(); // age; equal unknown ages retain the existing order
+        s.cycle_sort(); // size, descending by default
+
+        assert_eq!(s.sort_label(), "size ↓");
+        assert_eq!(s.items()[0].path, Path::new("/alpha"));
+        assert_eq!(s.items()[s.cursor()].path, Path::new("/alpha"));
+        assert!(s.is_selected(s.cursor()));
+
+        s.reverse_sort();
+
+        assert_eq!(s.sort_label(), "size ↑");
+        assert_eq!(s.items()[1].path, Path::new("/alpha"));
+        assert_eq!(s.items()[s.cursor()].path, Path::new("/alpha"));
+        assert!(s.is_selected(s.cursor()));
+    }
+
+    #[test]
     fn update_size_sets_the_matching_items_size() {
         let mut s = Selector::new(vec![fake_worktree("/a", Stale)]);
         s.update_size(Path::new("/a"), 1234);
@@ -962,7 +1241,7 @@ mod tests {
 
     #[test]
     fn apply_scan_event_progress_tracks_the_latest_path_only() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Progress(PathBuf::from("/a")));
         state.apply_scan_event(ScanEvent::Progress(PathBuf::from("/b")));
 
@@ -971,7 +1250,7 @@ mod tests {
 
     #[test]
     fn apply_scan_event_found_inserts_into_the_selector() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
 
         assert_eq!(state.selector.items().len(), 1);
@@ -980,7 +1259,7 @@ mod tests {
 
     #[test]
     fn apply_scan_event_size_updates_the_matching_worktree() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.apply_scan_event(ScanEvent::Size(PathBuf::from("/a"), 4096));
 
@@ -996,7 +1275,7 @@ mod tests {
         // `Browsing`, a `Size` event that arrives afterwards must still
         // reach the deletion snapshot — otherwise the totals shown to the
         // user stay wrong forever instead of just briefly.
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.selector.toggle();
         state.begin_deletion();
@@ -1013,7 +1292,7 @@ mod tests {
 
     #[test]
     fn apply_scan_event_done_marks_scan_done_and_clears_the_current_path() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Progress(PathBuf::from("/a")));
         state.apply_scan_event(ScanEvent::Done);
 
@@ -1023,7 +1302,7 @@ mod tests {
 
     #[test]
     fn begin_deletion_returns_none_and_stays_in_browsing_when_nothing_selected() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
 
         assert!(state.begin_deletion().is_none());
@@ -1031,8 +1310,44 @@ mod tests {
     }
 
     #[test]
+    fn dirty_selection_requires_confirmation_before_deletion() {
+        let mut state = AppState::new(false);
+        let mut dirty = fake_worktree("/dirty", Stale);
+        dirty.dirty = true;
+        state.apply_scan_event(ScanEvent::Found(dirty));
+        state.selector.toggle();
+
+        assert_eq!(state.prepare_deletion(), Some(true));
+        assert_eq!(state.phase, Phase::ConfirmingDirty);
+        assert_eq!(state.pending_deletion_items.len(), 1);
+
+        let chosen = state
+            .begin_deletion()
+            .expect("confirmed dirty selection should begin deletion");
+        assert_eq!(chosen.len(), 1);
+        assert!(chosen[0].dirty);
+        assert_eq!(state.phase, Phase::Deleting);
+    }
+
+    #[test]
+    fn dismissing_dirty_confirmation_returns_to_the_selected_list() {
+        let mut state = AppState::new(false);
+        let mut dirty = fake_worktree("/dirty", Stale);
+        dirty.dirty = true;
+        state.apply_scan_event(ScanEvent::Found(dirty));
+        state.selector.toggle();
+        state.prepare_deletion();
+
+        state.cancel_dirty_confirmation();
+
+        assert_eq!(state.phase, Phase::Browsing);
+        assert!(state.pending_deletion_items.is_empty());
+        assert!(state.selector.is_selected(0));
+    }
+
+    #[test]
     fn begin_deletion_snapshots_the_selection_and_switches_to_deleting() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.selector.toggle();
 
@@ -1045,7 +1360,7 @@ mod tests {
 
     #[test]
     fn apply_delete_event_tracks_the_currently_deleting_path() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.selector.toggle();
         state.begin_deletion();
@@ -1057,7 +1372,7 @@ mod tests {
 
     #[test]
     fn apply_delete_event_accumulates_outcomes_by_matching_path() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/b", Stale)));
         state.selector.toggle_all();
@@ -1098,7 +1413,7 @@ mod tests {
 
     #[test]
     fn apply_delete_event_done_switches_phase_and_clears_deleting_path() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.selector.toggle();
         state.begin_deletion();
@@ -1112,7 +1427,7 @@ mod tests {
 
     #[test]
     fn into_results_pairs_worktrees_with_their_outcomes() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.selector.toggle();
         state.begin_deletion();
@@ -1131,7 +1446,7 @@ mod tests {
 
     #[test]
     fn into_results_drops_worktrees_with_no_recorded_outcome() {
-        let mut state = AppState::new(false, false);
+        let mut state = AppState::new(false);
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/a", Orphaned)));
         state.apply_scan_event(ScanEvent::Found(fake_worktree("/b", Stale)));
         state.selector.toggle_all();

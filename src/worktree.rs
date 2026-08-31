@@ -11,8 +11,6 @@ pub struct Worktree {
     pub repo_path: Option<PathBuf>,
     /// Checked-out branch or ref name, if any.
     pub branch: Option<String>,
-    /// Short HEAD commit id.
-    pub head: Option<String>,
     /// Timestamp of the most recent commit reachable from HEAD.
     pub last_commit: Option<DateTime<Utc>>,
     /// Filesystem mtime of the worktree, used as an activity hint.
@@ -22,6 +20,9 @@ pub struct Worktree {
     /// Whether this worktree's HEAD is already merged into the owning repo's
     /// default branch (a strong hint it's safe to delete). `false` when unknown.
     pub merged: bool,
+    /// Whether the worktree has tracked modifications or untracked files.
+    /// This is used to require an explicit confirmation before removal.
+    pub dirty: bool,
     /// On-disk size of the worktree directory in bytes (what removing it
     /// frees). `None` means not yet computed — the streaming scanner reports
     /// worktrees before their (potentially expensive) size is known, and a

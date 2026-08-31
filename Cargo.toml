@@ -1,6 +1,6 @@
 [package]
 name = "worktree-cleaner"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Our own code only needs the edition-2024 floor (1.85), but ratatui — and
 # through it instability, time and darling — declares 1.88.0, so that's what a
@@ -15,6 +15,7 @@ repository = "https://github.com/DecampsRenan/worktree-cleaner"
 readme = "README.md"
 keywords = ["git", "worktree", "tui", "cli", "cleanup"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [".codex/**"]
 
 [[bin]]
 name = "wtc"

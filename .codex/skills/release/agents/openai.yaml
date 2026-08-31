@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release worktree-cleaner"
+  short_description: "Release this Rust CLI safely"
+  default_prompt: "Use $release to prepare the next worktree-cleaner release."

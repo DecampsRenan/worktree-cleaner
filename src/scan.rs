@@ -5,7 +5,7 @@ use std::thread;
 #[cfg(test)]
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use git2::Repository;
+use git2::{Repository, StatusOptions};
 use ignore::{Walk, WalkBuilder};
 
 use crate::size::directory_size;
@@ -208,12 +208,12 @@ fn classify(
 ) -> Worktree {
     let last_modified = fs_mtime(&path);
 
-    // Open the repository to read branch / HEAD / last commit. For a linked
+    // Open the repository to read branch and last commit. For a linked
     // worktree, failure to open means its repo or admin dir is gone.
     let opened = Repository::open(&path).ok();
-    let (branch, head, last_commit) = match &opened {
+    let (branch, last_commit) = match &opened {
         Some(repo) => read_head(repo),
-        None => (None, None, None),
+        None => (None, None),
     };
 
     let status = if is_main {
@@ -231,17 +231,29 @@ fn classify(
         (Some(repo), false) => is_merged(repo).unwrap_or(false),
         _ => false,
     };
+    let dirty = opened.as_ref().is_some_and(is_dirty);
     Worktree {
         path,
         repo_path,
         branch,
-        head,
         last_commit,
         last_modified,
         status,
         merged,
+        dirty,
         size_bytes,
     }
+}
+
+/// Whether the worktree contains changes that Git would refuse to remove
+/// without an explicit override. Include untracked files and their contents,
+/// because they are just as easy to lose as tracked modifications.
+fn is_dirty(repo: &Repository) -> bool {
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    repo.statuses(Some(&mut options))
+        .map(|statuses| !statuses.is_empty())
+        .unwrap_or(false)
 }
 
 /// Whether the worktree's HEAD is the default branch tip or an ancestor of it
@@ -272,21 +284,17 @@ fn default_branch_tip(repo: &Repository) -> Option<git2::Oid> {
     None
 }
 
-/// Read the branch shorthand, short HEAD id, and last commit time from a repo.
-fn read_head(repo: &Repository) -> (Option<String>, Option<String>, Option<DateTime<Utc>>) {
+/// Read the branch shorthand and last commit time from a repo.
+fn read_head(repo: &Repository) -> (Option<String>, Option<DateTime<Utc>>) {
     let Ok(head_ref) = repo.head() else {
-        return (None, None, None);
+        return (None, None);
     };
     let branch = head_ref.shorthand().ok().map(str::to_owned);
     let commit = head_ref.peel_to_commit().ok();
-    let head = commit.as_ref().map(|c| {
-        let id = c.id().to_string();
-        id[..7.min(id.len())].to_owned()
-    });
     let last_commit = commit
         .as_ref()
         .and_then(|c| DateTime::from_timestamp(c.time().seconds(), 0));
-    (branch, head, last_commit)
+    (branch, last_commit)
 }
 
 /// Filesystem mtime of the worktree directory, as a UTC timestamp.
@@ -403,9 +411,24 @@ mod tests {
 
         assert_eq!(w.status, WorktreeStatus::MainRepo);
         assert_eq!(w.branch.as_deref(), Some("main"));
-        assert!(w.head.is_some(), "head should be the short commit id");
         assert!(w.last_commit.is_some(), "last_commit should be set");
         assert!(w.last_modified.is_some(), "last_modified should be set");
+    }
+
+    #[test]
+    fn marks_worktrees_with_untracked_files_as_dirty() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        commit(&repo);
+        let wt = tmp.path().join("wt");
+        add_worktree(&repo, &wt);
+        std::fs::write(wt.join("scratch.txt"), "work in progress").unwrap();
+
+        let found = scan(tmp.path()).unwrap();
+        let dirty = found.iter().find(|w| w.path == canon(&wt)).unwrap();
+
+        assert!(dirty.dirty, "untracked files must require confirmation");
     }
 
     #[test]

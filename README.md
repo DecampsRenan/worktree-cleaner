@@ -52,7 +52,6 @@ faked from the outside.
 wtc                 # scan the current directory tree
 wtc ~/code          # scan a specific root
 wtc --dry-run       # show what would be deleted, delete nothing
-wtc --force         # also remove worktrees with uncommitted/untracked changes
 wtc --help          # all flags
 wtc --version
 ```
@@ -60,15 +59,17 @@ wtc --version
 Not sure yet? Start with `wtc --dry-run`: it walks and ranks exactly like a
 real run and shows you what would go, without touching anything.
 
-In the TUI, worktrees are listed best-deletion-candidate first, each row showing
-its status, age, reclaimable size, branch (tagged `(merged)` when merged), and
-short HEAD:
+In the TUI, worktrees are listed best-deletion-candidate first, with labeled
+columns for status, age, reclaimable size, branch (tagged `(merged)` when
+merged), and path:
 
 | Key | Action |
 | --- | --- |
 | `↑`/`↓` or `k`/`j` | move |
 | `space` / `x` | toggle the row |
 | `a` | toggle all selectable rows |
+| `s` | cycle the sort column |
+| `S` | reverse the current sort direction |
 | `enter` | delete the selected worktrees |
 | `q` / `esc` | cancel (delete nothing) |
 
@@ -81,9 +82,10 @@ background and show as `…` until they land. `ctrl-c` aborts at any point.
 
 ### How deletion works
 
-- **Healthy linked worktree** → `git worktree remove`. If it's dirty
-  (uncommitted or untracked changes) the removal is refused and reported as
-  failed — pass `--force` to remove it anyway.
+- **Healthy linked worktree** → `git worktree remove`. If it contains
+  uncommitted or untracked changes, the TUI first lists the affected
+  worktrees and asks for an explicit `enter` confirmation before removing
+  them.
 - **Orphaned worktree** (its repo or admin dir is gone) → the directory is
   removed from the filesystem.
 - **Main working tree** → never deleted.

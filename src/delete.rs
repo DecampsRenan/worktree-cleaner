@@ -74,19 +74,19 @@ impl Reclaimed {
 /// Delete the given worktrees, returning a per-worktree outcome report.
 ///
 /// A failure on one worktree never aborts the others. With `dry_run`, nothing
-/// is removed and every outcome is [`DeleteAction::DryRun`]. With `force`, a
-/// worktree that `git worktree remove` refuses (dirty/untracked changes) is
-/// retried with `--force`; without it, such a worktree is left as `Failed`.
+/// is removed and every outcome is [`DeleteAction::DryRun`]. The test helper
+/// never overrides Git's protection for local changes; the interactive TUI
+/// only does that after an explicit confirmation.
 ///
 /// The production binary uses [`delete_streaming`] instead, so progress is
 /// visible as it happens; this batch form (return everything at once) is
 /// kept as a test utility — simpler to assert a full report against than
 /// draining a channel.
 #[cfg(test)]
-pub fn delete(worktrees: &[Worktree], dry_run: bool, force: bool) -> Vec<DeleteOutcome> {
+pub fn delete(worktrees: &[Worktree], dry_run: bool) -> Vec<DeleteOutcome> {
     worktrees
         .iter()
-        .map(|wt| remove_one(wt, dry_run, force))
+        .map(|wt| remove_one(wt, dry_run, false))
         .collect()
 }
 
@@ -116,14 +116,14 @@ pub enum DeleteEvent {
 pub fn delete_streaming(
     worktrees: Vec<Worktree>,
     dry_run: bool,
-    force: bool,
+    confirmed_dirty: bool,
     tx: mpsc::Sender<DeleteEvent>,
 ) {
     for wt in &worktrees {
         if tx.send(DeleteEvent::Deleting(wt.path.clone())).is_err() {
             return;
         }
-        let outcome = remove_one(wt, dry_run, force);
+        let outcome = remove_one(wt, dry_run, confirmed_dirty);
         if tx.send(DeleteEvent::Deleted(outcome)).is_err() {
             return;
         }
@@ -131,7 +131,7 @@ pub fn delete_streaming(
     let _ = tx.send(DeleteEvent::Done);
 }
 
-fn remove_one(wt: &Worktree, dry_run: bool, force: bool) -> DeleteOutcome {
+fn remove_one(wt: &Worktree, dry_run: bool, confirmed_dirty: bool) -> DeleteOutcome {
     let outcome = |action, detail: &str| DeleteOutcome {
         path: wt.path.clone(),
         action,
@@ -164,19 +164,16 @@ fn remove_one(wt: &Worktree, dry_run: bool, force: bool) -> DeleteOutcome {
         return outcome(DeleteAction::DryRun, "would run git worktree remove");
     }
 
-    // Plain remove first; git refuses a dirty worktree unless forced.
-    match git_worktree_remove(repo_dir, &wt.path, false) {
+    // Only worktrees identified as dirty during the scan get an override,
+    // and only after the warning screen has been confirmed. If a clean
+    // worktree becomes dirty after scanning, Git still rejects its removal.
+    let remove_dirty = confirmed_dirty && wt.dirty;
+    match git_worktree_remove(repo_dir, &wt.path, remove_dirty) {
+        Ok(o) if o.status.success() && remove_dirty => outcome(
+            DeleteAction::Removed,
+            "git worktree remove --force (confirmed local changes)",
+        ),
         Ok(o) if o.status.success() => outcome(DeleteAction::Removed, "git worktree remove"),
-        Ok(_) if force => match git_worktree_remove(repo_dir, &wt.path, true) {
-            Ok(o2) if o2.status.success() => {
-                outcome(DeleteAction::Removed, "force-removed (had local changes)")
-            }
-            Ok(o2) => outcome(
-                DeleteAction::Failed,
-                String::from_utf8_lossy(&o2.stderr).trim(),
-            ),
-            Err(e) => outcome(DeleteAction::Failed, &e.to_string()),
-        },
         Ok(o) => outcome(
             DeleteAction::Failed,
             String::from_utf8_lossy(&o.stderr).trim(),
@@ -242,7 +239,7 @@ mod tests {
         add_worktree(&repo, &wt_path);
 
         let wt = discover(tmp.path(), &wt_path);
-        let outcomes = delete(&[wt], false, false);
+        let outcomes = delete(&[wt], false);
 
         assert!(!wt_path.exists(), "worktree directory should be gone");
         assert_eq!(outcomes.len(), 1);
@@ -263,7 +260,7 @@ mod tests {
         add_worktree(&repo, &wt_path);
 
         let wt = discover(tmp.path(), &wt_path);
-        let outcomes = delete(&[wt], true, false);
+        let outcomes = delete(&[wt], true);
 
         assert!(wt_path.exists(), "dry run must not remove anything");
         assert_eq!(outcomes[0].action, DeleteAction::DryRun);
@@ -284,7 +281,7 @@ mod tests {
         let wt = discover(tmp.path(), &wt_path);
         assert_eq!(wt.status, WorktreeStatus::Orphaned, "precondition");
 
-        let outcomes = delete(&[wt], false, false);
+        let outcomes = delete(&[wt], false);
 
         assert!(!wt_path.exists(), "orphaned directory should be removed");
         assert_eq!(outcomes[0].action, DeleteAction::Removed);
@@ -300,7 +297,7 @@ mod tests {
         let main = discover(tmp.path(), &repo);
         assert_eq!(main.status, WorktreeStatus::MainRepo, "precondition");
 
-        let outcomes = delete(&[main], false, false);
+        let outcomes = delete(&[main], false);
 
         assert!(repo.exists(), "main working tree must never be deleted");
         assert_eq!(outcomes[0].action, DeleteAction::Skipped);
@@ -321,15 +318,15 @@ mod tests {
             path: tmp.path().join("nope"),
             repo_path: None,
             branch: None,
-            head: None,
             last_commit: None,
             last_modified: None,
             status: WorktreeStatus::Stale,
             merged: false,
+            dirty: false,
             size_bytes: None,
         };
 
-        let outcomes = delete(&[bogus, healthy], false, false);
+        let outcomes = delete(&[bogus, healthy], false);
 
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcomes[0].action, DeleteAction::Failed);
@@ -345,18 +342,18 @@ mod tests {
         commit(&repo);
         let wt_path = tmp.path().join("wt");
         add_worktree(&repo, &wt_path);
-        // Leave an untracked file: git refuses to remove without --force.
+        // Leave an untracked file: git must refuse to remove it.
         std::fs::write(wt_path.join("scratch.txt"), "work in progress").unwrap();
 
         let wt = discover(tmp.path(), &wt_path);
-        let outcomes = delete(&[wt], false, false);
+        let outcomes = delete(&[wt], false);
 
         assert!(wt_path.exists(), "a dirty worktree must be kept");
         assert_eq!(outcomes[0].action, DeleteAction::Failed);
     }
 
     #[test]
-    fn force_removes_a_dirty_worktree() {
+    fn confirmed_removal_deletes_a_dirty_worktree() {
         let tmp = tempdir().unwrap();
         let repo = tmp.path().join("repo");
         init_repo(&repo);
@@ -366,35 +363,15 @@ mod tests {
         std::fs::write(wt_path.join("scratch.txt"), "work in progress").unwrap();
 
         let wt = discover(tmp.path(), &wt_path);
-        let outcomes = delete(&[wt], false, true); // force
-
-        assert!(!wt_path.exists(), "force should remove the dirty worktree");
-        assert_eq!(outcomes[0].action, DeleteAction::Removed);
-        assert!(
-            outcomes[0].detail.contains("force"),
-            "detail should note force was used, got {:?}",
-            outcomes[0].detail
-        );
-    }
-
-    #[test]
-    fn force_with_dry_run_removes_nothing() {
-        let tmp = tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        init_repo(&repo);
-        commit(&repo);
-        let wt_path = tmp.path().join("wt");
-        add_worktree(&repo, &wt_path);
-        std::fs::write(wt_path.join("scratch.txt"), "work in progress").unwrap();
-
-        let wt = discover(tmp.path(), &wt_path);
-        let outcomes = delete(&[wt], true, true); // dry-run wins over force
+        assert!(wt.dirty, "precondition: scanner detects local changes");
+        let outcome = remove_one(&wt, false, true);
 
         assert!(
-            wt_path.exists(),
-            "dry run must not remove even with --force"
+            !wt_path.exists(),
+            "confirmed removal should delete the worktree"
         );
-        assert_eq!(outcomes[0].action, DeleteAction::DryRun);
+        assert_eq!(outcome.action, DeleteAction::Removed);
+        assert!(outcome.detail.contains("confirmed local changes"));
     }
 
     #[test]
@@ -428,7 +405,7 @@ mod tests {
             wt.path
         );
 
-        let outcomes = delete(&[wt], false, false);
+        let outcomes = delete(&[wt], false);
 
         assert_eq!(
             outcomes[0].action,
@@ -587,11 +564,11 @@ mod tests {
             path: tmp.path().join("nope"),
             repo_path: None,
             branch: None,
-            head: None,
             last_commit: None,
             last_modified: None,
             status: WorktreeStatus::Stale,
             merged: false,
+            dirty: false,
             size_bytes: None,
         };
 

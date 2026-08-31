@@ -46,11 +46,11 @@ pub fn fake_worktree(path: &str, status: WorktreeStatus) -> Worktree {
         path: path.into(),
         repo_path: None,
         branch: None,
-        head: None,
         last_commit: None,
         last_modified: None,
         status,
         merged: false,
+        dirty: false,
         size_bytes: None,
     }
 }

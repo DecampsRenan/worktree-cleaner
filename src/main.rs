@@ -26,10 +26,6 @@ struct Args {
     /// Show what would be deleted without removing anything.
     #[arg(long)]
     dry_run: bool,
-
-    /// Force-remove worktrees with uncommitted or untracked changes.
-    #[arg(long)]
-    force: bool,
 }
 
 fn main() -> Result<()> {
@@ -48,7 +44,7 @@ fn main() -> Result<()> {
     // the selection in the background too, with live per-item progress. The
     // TUI itself reports "no worktrees found" if the scan comes up empty, so
     // there's no separate upfront check here.
-    let results = tui::run(args.path, args.dry_run, args.force)?;
+    let results = tui::run(args.path, args.dry_run)?;
     if results.is_empty() {
         println!("Nothing selected.");
         return Ok(());

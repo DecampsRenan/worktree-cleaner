@@ -51,11 +51,11 @@ mod tests {
             path: format!("/tmp/{status:?}-{days_old}").into(),
             repo_path: None,
             branch: None,
-            head: None,
             last_commit: Some(when),
             last_modified: Some(when),
             status,
             merged: false,
+            dirty: false,
             size_bytes: None,
         }
     }
