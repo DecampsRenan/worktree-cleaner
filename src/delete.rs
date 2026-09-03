@@ -78,16 +78,21 @@ impl Reclaimed {
 /// never overrides Git's protection for local changes; the interactive TUI
 /// only does that after an explicit confirmation.
 ///
-/// The production binary uses [`delete_streaming`] instead, so progress is
-/// visible as it happens; this batch form (return everything at once) is
-/// kept as a test utility — simpler to assert a full report against than
+/// The production binary uses [`delete_streaming`] for the TUI and
+/// [`delete_batch`] for the non-interactive path; this batch form returns
+/// everything at once — simpler to assert a full report against than
 /// draining a channel.
-#[cfg(test)]
-pub fn delete(worktrees: &[Worktree], dry_run: bool) -> Vec<DeleteOutcome> {
+pub fn delete_batch(worktrees: &[Worktree], dry_run: bool, force: bool) -> Vec<DeleteOutcome> {
     worktrees
         .iter()
-        .map(|wt| remove_one(wt, dry_run, false))
+        .map(|wt| remove_one(wt, dry_run, force))
         .collect()
+}
+
+/// Test alias for [`delete_batch`] with `force = false`.
+#[cfg(test)]
+fn delete(worktrees: &[Worktree], dry_run: bool) -> Vec<DeleteOutcome> {
+    delete_batch(worktrees, dry_run, false)
 }
 
 /// An event emitted while a [`delete_streaming`] deletion run is in
