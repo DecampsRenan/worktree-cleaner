@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
-#[cfg(test)]
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use git2::{Repository, StatusOptions};
@@ -30,8 +29,8 @@ const SIZE_WORKERS: usize = 4;
 /// The production binary uses [`scan_streaming`] instead, so the whole scan
 /// isn't blocking; this synchronous, collect-into-a-`Vec` form is kept as a
 /// test utility (simpler to assert against than draining a channel) and as
-/// straightforward documentation of what a scan produces.
-#[cfg(test)]
+/// straightforward documentation of what a scan produces. Also used by the
+/// non-interactive CLI path, which needs a complete result before acting.
 pub fn scan(root: &Path) -> Result<Vec<Worktree>> {
     let mut found = Vec::new();
 

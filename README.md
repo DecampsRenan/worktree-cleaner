@@ -40,7 +40,7 @@ cargo install --path .
 ## Usage
 
 ```bash
-wtc                 # scan the current directory tree
+wtc                 # scan the current directory tree (TUI when stdin/stdout are TTYs)
 wtc ~/code          # scan a specific root
 wtc --dry-run       # show what would be deleted, delete nothing
 wtc --help          # all flags
@@ -48,7 +48,32 @@ wtc --help          # all flags
 
 Not sure yet? Start with `wtc --dry-run`: same walk and ranking, nothing deleted.
 
-In the TUI, worktrees are listed best-deletion-candidate first, with columns for status, age, reclaimable size, branch (tagged `(merged)` when merged), and path:
+### Non-interactive mode (scripts, CI, agents)
+
+When **stdin or stdout is not a TTY** (piped, redirected, or running in CI), `wtc` prints a ranked tab-separated table and exits without opening the TUI or deleting anything:
+
+```bash
+wtc ~/code | less          # list worktrees ranked by relevance
+wtc --dry-run ~/code       # same table, with a DELETE column marking selectable rows
+```
+
+To delete without the TUI, pass **`--yes`** / **`-y`** (this replaces any confirmation prompt — there is never a keypress wait):
+
+```bash
+wtc --yes ~/code                    # delete all selectable worktrees
+wtc --yes --dry-run ~/code          # print what would be deleted, delete nothing
+wtc --yes --orphaned ~/code         # only orphaned worktrees
+wtc --yes --stale ~/code            # orphaned + stale worktrees
+wtc --yes --force ~/code            # also remove worktrees with local changes
+```
+
+Without `--force`, worktrees with uncommitted or untracked changes are **skipped** and listed on stderr. The main working tree is never deleted.
+
+`ctrl-c` still aborts at any point.
+
+### Interactive TUI
+
+When stdin and stdout are both TTYs and `--yes` is not passed, `wtc` opens the interactive list. Worktrees are listed best-deletion-candidate first, with columns for status, age, reclaimable size, branch (tagged `(merged)` when merged), and path:
 
 | Key | Action |
 | --- | --- |
