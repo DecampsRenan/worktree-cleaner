@@ -12,13 +12,20 @@ pub enum SelectionFilter {
 }
 
 impl SelectionFilter {
-    pub fn from_flags(orphaned: bool, stale: bool) -> Self {
-        if orphaned {
-            Self::OrphanedOnly
-        } else if stale {
-            Self::OrphanedAndStale
-        } else {
-            Self::AllSelectable
+    /// Map the mutually-exclusive CLI filter flags to a filter.
+    ///
+    /// With no flag the default is the conservative [`OrphanedAndStale`]:
+    /// active checkouts are only ever swept with an explicit `--all`, so an
+    /// unattended `wtc --yes` never deletes a worktree you're actively using
+    /// (unlike the TUI, where a human reviews the list before confirming).
+    ///
+    /// [`OrphanedAndStale`]: SelectionFilter::OrphanedAndStale
+    pub fn from_flags(orphaned: bool, stale: bool, all: bool) -> Self {
+        match (orphaned, stale, all) {
+            (true, _, _) => Self::OrphanedOnly,
+            (_, _, true) => Self::AllSelectable,
+            // `--stale` and the no-filter default both mean orphaned + stale.
+            _ => Self::OrphanedAndStale,
         }
     }
 }
@@ -94,5 +101,27 @@ mod tests {
         ];
         let selected = select_for_deletion(&worktrees, SelectionFilter::OrphanedAndStale);
         assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn from_flags_default_is_the_safe_orphaned_and_stale() {
+        // No filter must never resolve to AllSelectable: a bare `wtc --yes`
+        // should leave active worktrees alone.
+        assert_eq!(
+            SelectionFilter::from_flags(false, false, false),
+            SelectionFilter::OrphanedAndStale
+        );
+        assert_eq!(
+            SelectionFilter::from_flags(false, true, false),
+            SelectionFilter::OrphanedAndStale
+        );
+        assert_eq!(
+            SelectionFilter::from_flags(true, false, false),
+            SelectionFilter::OrphanedOnly
+        );
+        assert_eq!(
+            SelectionFilter::from_flags(false, false, true),
+            SelectionFilter::AllSelectable
+        );
     }
 }

@@ -29,10 +29,30 @@ enum RunMode {
     NonInteractive,
 }
 
+/// Extra `--help` text: the run modes are picked automatically from whether a
+/// terminal is attached, which is worth spelling out, plus the dry-run-first
+/// recipe scripts and agents should follow.
+const AFTER_HELP: &str = "\
+MODES (chosen automatically):
+  wtc [PATH]            Interactive TUI, when stdin and stdout are both terminals.
+  wtc [PATH] | cat      Non-TTY (piped, redirected, or CI): print a ranked TSV
+                        table and exit — nothing is deleted.
+  wtc --yes [PATH]      Delete the matching worktrees with no prompt (any TTY).
+
+SAFE USAGE (recommended for scripts and agents — preview before deleting):
+  wtc --dry-run [PATH]        Preview: a DELETE column marks what --yes would remove.
+  wtc --yes --dry-run [PATH]  Same preview, through the delete code path.
+  wtc --yes [PATH]            Delete orphaned + stale worktrees (the safe default).
+  wtc --yes --all [PATH]      Also delete ACTIVE worktrees (widest, most destructive).
+
+Dirty worktrees (uncommitted or untracked changes) are skipped unless --force.
+The main working tree is never deleted. The exit code is non-zero if any deletion fails.";
+
 /// Traverse a directory tree, find git worktrees, rank them by relevance, and
-/// interactively delete orphaned or stale ones.
+/// delete orphaned or stale ones — interactively (TUI) or non-interactively
+/// (`--yes`, for scripts, CI, and agents).
 #[derive(Debug, Parser)]
-#[command(name = "wtc", version, about)]
+#[command(name = "wtc", version, about, after_help = AFTER_HELP)]
 struct Args {
     /// Root directory to scan (defaults to the current directory).
     #[arg(default_value = ".")]
@@ -42,35 +62,57 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
-    /// Non-interactive: delete all matching selectable worktrees without
-    /// opening the TUI. Requires this flag instead of a confirmation prompt.
+    /// Non-interactive: delete the matching worktrees without opening the TUI
+    /// and without any confirmation prompt. By default this removes only
+    /// orphaned and stale worktrees; pass --all to also remove active ones.
+    /// Preview with --dry-run first.
     #[arg(long, short = 'y')]
     yes: bool,
 
-    /// In non-interactive mode, also remove worktrees with uncommitted or
-    /// untracked changes. Without this flag, dirty worktrees are skipped and
-    /// reported on stderr.
+    /// Also remove worktrees with uncommitted or untracked changes. Without
+    /// this flag, dirty worktrees are skipped and reported on stderr.
     #[arg(long)]
     force: bool,
 
-    /// In non-interactive mode, only delete orphaned worktrees.
-    #[arg(long, conflicts_with = "stale")]
+    /// Restrict deletion to orphaned worktrees only.
+    #[arg(long, conflicts_with_all = ["stale", "all"])]
     orphaned: bool,
 
-    /// In non-interactive mode, only delete orphaned and stale worktrees.
-    #[arg(long, conflicts_with = "orphaned")]
+    /// Restrict deletion to orphaned and stale worktrees (this is also the
+    /// default when no --orphaned/--stale/--all flag is given).
+    #[arg(long, conflicts_with_all = ["orphaned", "all"])]
     stale: bool,
+
+    /// Widen deletion to every worktree except the main working tree —
+    /// including active ones. The most destructive filter; preview it with
+    /// --dry-run first.
+    #[arg(long, conflicts_with_all = ["orphaned", "stale"])]
+    all: bool,
 }
 
 impl Args {
+    /// The filter/force flags refine a non-interactive run; passing any of
+    /// them signals non-interactive intent, so we never fall through to the
+    /// TUI (which would silently ignore them).
+    fn has_noninteractive_flags(&self) -> bool {
+        self.force || self.orphaned || self.stale || self.all
+    }
+
     fn run_mode(&self) -> RunMode {
         if self.yes {
             RunMode::NonInteractive
-        } else if stdin().is_terminal() && stdout().is_terminal() {
+        } else if stdin().is_terminal()
+            && stdout().is_terminal()
+            && !self.has_noninteractive_flags()
+        {
             RunMode::Interactive
         } else {
             RunMode::ListOnly
         }
+    }
+
+    fn filter(&self) -> SelectionFilter {
+        SelectionFilter::from_flags(self.orphaned, self.stale, self.all)
     }
 }
 
@@ -84,10 +126,10 @@ fn main() -> Result<()> {
         bail!("path does not exist: {}", args.path.display());
     }
 
+    let filter = args.filter();
     match args.run_mode() {
-        RunMode::ListOnly => noninteractive::list(args.path, args.dry_run),
+        RunMode::ListOnly => noninteractive::list(args.path, args.dry_run, args.force, filter),
         RunMode::NonInteractive => {
-            let filter = SelectionFilter::from_flags(args.orphaned, args.stale);
             noninteractive::delete(args.path, args.dry_run, args.force, filter)
         }
         RunMode::Interactive => run_interactive(args.path, args.dry_run),

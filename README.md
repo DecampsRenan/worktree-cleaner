@@ -53,21 +53,26 @@ Not sure yet? Start with `wtc --dry-run`: same walk and ranking, nothing deleted
 When **stdin or stdout is not a TTY** (piped, redirected, or running in CI), `wtc` prints a ranked tab-separated table and exits without opening the TUI or deleting anything:
 
 ```bash
-wtc ~/code | less          # list worktrees ranked by relevance
-wtc --dry-run ~/code       # same table, with a DELETE column marking selectable rows
+wtc ~/code | less          # list worktrees ranked by relevance (TSV on stdout)
+wtc --dry-run ~/code       # same table, plus a DELETE column marking what --yes would remove
 ```
+
+The `DELETE` column reflects the active filter and `--force`, so the preview matches exactly what the corresponding `--yes` run would delete. Advisory lines (the "N would be deleted" summary, skip notices) go to **stderr**, keeping stdout a clean TSV for parsing.
 
 To delete without the TUI, pass **`--yes`** / **`-y`** (this replaces any confirmation prompt — there is never a keypress wait):
 
 ```bash
-wtc --yes ~/code                    # delete all selectable worktrees
+wtc --yes ~/code                    # delete orphaned + stale worktrees (the safe default)
 wtc --yes --dry-run ~/code          # print what would be deleted, delete nothing
 wtc --yes --orphaned ~/code         # only orphaned worktrees
-wtc --yes --stale ~/code            # orphaned + stale worktrees
+wtc --yes --stale ~/code            # orphaned + stale worktrees (same as the default)
+wtc --yes --all ~/code              # ALSO delete active worktrees (widest, most destructive)
 wtc --yes --force ~/code            # also remove worktrees with local changes
 ```
 
-Without `--force`, worktrees with uncommitted or untracked changes are **skipped** and listed on stderr. The main working tree is never deleted.
+By default `--yes` deletes only **orphaned and stale** worktrees — active checkouts are left alone unless you pass `--all`, so an unattended run never removes a worktree you're actively using. Without `--force`, worktrees with uncommitted or untracked changes are **skipped** and listed on stderr. The main working tree is never deleted. If any deletion fails, `wtc` exits non-zero so CI can catch it.
+
+`--force`, `--orphaned`, `--stale`, and `--all` are mutually exclusive where noted and imply non-interactive listing — passing one on a bare terminal prints the table instead of silently opening the TUI.
 
 `ctrl-c` still aborts at any point.
 

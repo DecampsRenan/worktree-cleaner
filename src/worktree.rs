@@ -56,6 +56,19 @@ impl WorktreeStatus {
 }
 
 impl Worktree {
+    /// Human label for the branch column: the branch name, tagged `(merged)`
+    /// when this worktree's HEAD is already merged into the default branch;
+    /// `-` (or a bare `(merged)`) when the branch name is unknown. Shared by
+    /// the TUI list and the non-interactive table so the two never drift.
+    pub fn branch_label(&self) -> String {
+        match (self.branch.as_deref(), self.merged) {
+            (Some(b), true) => format!("{b} (merged)"),
+            (Some(b), false) => b.to_string(),
+            (None, true) => "(merged)".to_string(),
+            (None, false) => "-".to_string(),
+        }
+    }
+
     /// A coarse "Nd/Nmo/Ny ago" label for the worktree's last activity.
     pub fn age_label(&self) -> String {
         let Some(when) = self.last_commit.or(self.last_modified) else {

@@ -185,9 +185,10 @@ impl Selector {
     }
 
     /// Whether row `i` may be selected for deletion (the main working tree
-    /// never can).
+    /// never can). Shares its rule with the non-interactive path via
+    /// [`selection::is_selectable`] so the two can't drift.
     pub fn selectable(&self, i: usize) -> bool {
-        self.items[i].status != WorktreeStatus::MainRepo
+        crate::selection::is_selectable(&self.items[i])
     }
 
     pub fn toggle(&mut self) {
@@ -726,12 +727,7 @@ fn worktree_row(w: &Worktree, selectable: bool, selected: bool) -> Row<'static> 
     } else {
         "[ ]"
     };
-    let branch = match (w.branch.as_deref(), w.merged) {
-        (Some(b), true) => format!("{b} (merged)"),
-        (Some(b), false) => b.to_string(),
-        (None, true) => "(merged)".to_string(),
-        (None, false) => "-".to_string(),
-    };
+    let branch = w.branch_label();
     // A pending size (still being computed on a background worker) shows as
     // "…" rather than blocking the row from appearing at all.
     let size = match w.size_bytes {

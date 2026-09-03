@@ -35,7 +35,12 @@ pub fn scan(root: &Path) -> Result<Vec<Worktree>> {
     let mut found = Vec::new();
 
     for entry in build_walker(root) {
-        let entry = entry?;
+        // Skip unreadable entries (e.g. a permission-denied directory) rather
+        // than aborting the whole scan, matching `scan_streaming`'s
+        // resilience — one bad directory shouldn't sink a non-interactive run.
+        let Ok(entry) = entry else {
+            continue;
+        };
         if entry.file_name() != ".git" {
             continue;
         }
